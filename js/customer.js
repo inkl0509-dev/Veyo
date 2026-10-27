@@ -4,7 +4,7 @@ import * as K from './core.js';
 const { S, ME, UI, F, db, WINDOWS, AC_TYPES, BTUS, SVC_ICONS, METHODS, TZ, esc, money, today, addDays, nowISO, fd, ft, slotText,
   job, sv, tech, co, PCFG, stage, pill, jobTitle, myCustomer, pickDefault, run, toast, render, saveUI, d, c, event, initials,
   trackingSec, quoteSec, invoiceSec, ratingSec, workSec, messagesSec, avgRating, stars, etaHTML, totals, overdue, staleTrip,
-  pushState, pushPrompt } = K;
+  pushState, pushPrompt, accepted } = K;
 
 const ICON = {
   home:'<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/>',
@@ -84,7 +84,7 @@ function actionFor(j){
 function todoItem(j){ const a=actionFor(j);
   return `<button class="todo-item t-${a.tone}" data-act="openJob" data-id="${j.id}"><span class="ti-ic">${svg(a.ic)}</span><span class="ti-txt"><b>${a.t}</b><small>${a.s}</small></span><span class="ti-go">${a.cta} →</span></button>`; }
 function jobCard(j){
-  const dt=j.slot?.date||j.preferredDate||(j.createdAt||'').slice(0,10), x=new Date(dt+'T12:00:00Z'), t=tech(j.techId);
+  const dt=j.slot?.date||j.preferredDate||(j.createdAt||'').slice(0,10), x=new Date(dt+'T12:00:00Z'), t=accepted(j)?tech(j.techId):null;
   return `<button class="jcard" data-act="openJob" data-id="${j.id}">
     <span class="jdate"><b>${x.getUTCDate()||''}</b><small>${x.toLocaleDateString('en-GB',{month:'short',timeZone:'UTC'})}</small></span>
     <span class="jc-main"><b>${esc(jobTitle(j))}</b><small>${esc(j.no)}${j.slot?' · '+t12s(j.slot.time):j.window?' · '+esc(WINDOWS[j.window].split(',')[0]):''}${t?' · '+esc(t.name):''}</small></span>${pill(j)}</button>`;
@@ -122,6 +122,7 @@ function statusInfo(j){
     case 'quoted': return {tone:'orchid', title:'Your quotation is ready', sub:`${money(totals(j.quote).total)} including GST. Review it below and approve.`};
     case 'declined': return {tone:'coral', title:'You declined the quotation', sub:'The office will get in touch to talk it through.'};
     case 'approved': return {tone:'lagoon', title:'Quotation approved', sub:j.slot?`See you ${slotText(j.slot)}.`:"We'll confirm the visit time soon."};
+    case 'offered': case 'awaiting': return {tone:'lagoon', title:'Finding your technician', sub:`${j.slot?'Your visit is '+slotText(j.slot)+'. ':''}We'll tell you as soon as a technician confirms.`};
     case 'assigned': return {tone:'lagoon', title:`${tn} will visit you`, sub:j.slot?slotText(j.slot)+'.':'Visit time to be confirmed.'};
     case 'enroute': return staleTrip(j)? {tone:'lagoon', title:`${tn} is on the way`, sub:'Live location is no longer available for this trip.'} : {tone:'teal', title:`${tn} is on the way`, sub:'Follow them on the map below.'};
     case 'onsite': return {tone:'teal', title:`${tn} is working on your AC`, sub:`Arrived at ${ft(j.arrivedAt)}.`};
@@ -157,7 +158,7 @@ function customerJob(j){
   return h+`</div></div>`;
 }
 function detailsSec(j){
-  const t=tech(j.techId), ar=t?avgRating(t.id):null, phone=PCFG().showTechPhone && t?.phone;
+  const t=accepted(j)?tech(j.techId):null, ar=t?avgRating(t.id):null, phone=PCFG().showTechPhone && t?.phone;
   return `<div class="sec"><h3>Visit details</h3><div class="kv">
       <div><span class="label">When</span><b>${j.slot?slotText(j.slot):'Waiting for confirmation'}</b>${j.slot?'':`<span class="small muted">You asked for ${fd(j.preferredDate)}${j.window?', '+esc(WINDOWS[j.window].split(',')[0].toLowerCase()):''}</span>`}</div>
       <div><span class="label">Where</span><b>${esc(j.address||'')}${j.island?', '+esc(j.island):''}</b></div>
