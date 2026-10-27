@@ -1,12 +1,12 @@
 {
-  "name": "AC Service \u00b7 Admin Portal",
-  "short_name": "AC Admin",
-  "description": "Run the AC service desk.",
-  "start_url": "admin.html",
+  "name": "AC Service \u00b7 Customer Portal",
+  "short_name": "AC Service",
+  "description": "Book AC service, track your technician and pay.",
+  "start_url": "index.html",
   "scope": "./",
   "display": "standalone",
   "background_color": "#F1F6FA",
-  "theme_color": "#0B2545",
+  "theme_color": "#0077B6",
   "icons": [
     {
       "src": "assets/icon-192.png",
