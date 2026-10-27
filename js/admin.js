@@ -2,7 +2,7 @@
 import * as K from './core.js';
 const { S, ME, UI, F, db, ACCTS, METHODS, WINDOWS, CUR, PORTAL_URL, PORTAL_NAME, portalLink,
   esc, money, r2, fd, fdt, today, addDays, nowISO, initials, stars, avgRating, hint, stage, jobTitle, job, sv, co, PCFG,
-  balances, sideBal, pill, jobItem, jobDetail, run, toast, render, saveUI, d, c, log, event, createLogin, pickDefault, val, chatThread, chatUnread, ago } = K;
+  balances, sideBal, pill, jobItem, jobDetail, run, toast, render, saveUI, d, c, log, event, createLogin, pickDefault, val, chatThread, chatUnread, ago, BRAND_PRESETS, brandPalette, readLogo, defaultMarkSvg } = K;
 
 function providerView(){
   const n=S.jobs.filter(j=>hint(j)).length;
@@ -214,9 +214,39 @@ function chartSVG(t){
 }
 
 /* ---------- provider: settings ---------- */
+/* ---------- brand ---------- */
+const DEFAULT_BRAND={color:'#0077B6', color2:'#00A08E', logo:'', iconBg:'white'};
+function brandDraft(){ return UI.bd || (UI.bd={...DEFAULT_BRAND, ...(S.brand||{})}); }
+function previewVars(b){ const p=brandPalette(b).light; return `--pa:${p['--hero-a']};--pb:${p['--hero-b']};--pm:${p['--lagoon']};--pi:${p['--lagoon-ink']};--ps:${p['--lagoon-soft']}`; }
+function brandCard(){
+  const b=brandDraft(), base={...DEFAULT_BRAND, ...(S.brand||{})}, dirty=['color','color2','logo','iconBg'].some(k=>(b[k]||'')!==(base[k]||''));
+  const mark = b.logo ? `<img src="${esc(b.logo)}" alt="">` : `<img src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(defaultMarkSvg(brandPalette(b).light['--hero-a'],brandPalette(b).light['--hero-b']))}" alt="">`;
+  const color=(k,label)=>`<label class="field"><span>${label}</span><span class="color-in"><input type="color" id="brand-${k}" data-np data-brand="${k}" value="${esc(b[k])}"><input class="mono" id="brand-${k}-hex" data-np data-brandhex="${k}" value="${esc(b[k])}" maxlength="7" aria-label="${label} hex code"></span></label>`;
+  return `<div class="card brand-card" style="margin-bottom:18px"><div class="card-h"><h3>Brand: logo and colours</h3><span class="small muted">Your customers and technicians see these</span></div>
+    <div class="card-b brand-grid">
+      <div class="stack">
+        <div class="field"><span>Logo</span><div class="row">${b.logo?`<img class="logo-prev" src="${esc(b.logo)}" alt="Your logo">`:'<span class="small muted">No logo yet. The standard AC icon is used.</span>'}
+          <label class="btn sm upload-btn"><input type="file" id="brand-logo" data-np accept="image/*" data-change="brandLogo">${b.logo?'Change logo':'Upload logo'}</label>${b.logo?'<button type="button" class="btn sm danger" data-act="brandLogoRemove">Remove</button>':''}</div>
+          <span class="small muted">A square logo works best: PNG with a transparent background, or SVG.</span></div>
+        <div class="field"><span>Colour themes</span><div class="swatches">${BRAND_PRESETS.map(([n,a,c])=>`<button type="button" class="swatch" data-act="brandPreset" data-a="${a}" data-b="${c}" aria-pressed="${b.color.toLowerCase()===a.toLowerCase()&&b.color2.toLowerCase()===c.toLowerCase()}" title="${n}" style="background:linear-gradient(135deg,${a},${c})"><span class="sr">${n}</span></button>`).join('')}</div></div>
+        <div class="grid2">${color('color','Main colour')}${color('color2','Second colour')}</div>
+        ${b.logo?`<div class="field"><span>App icon background</span><div class="chips">${[['white','White'],['brand','Main colour']].map(([k,l])=>`<button type="button" class="chip" data-act="brandIconBg" data-v="${k}" aria-pressed="${(b.iconBg||'white')===k}">${l}</button>`).join('')}</div></div>`:''}
+        <div class="row"><button class="btn primary" data-act="brandSave">Save brand</button><button class="btn" data-act="brandDefault">Reset to standard</button>${dirty?'<span class="small" style="color:var(--coral-text);font-weight:700">Not saved yet</span>':''}</div>
+        <p class="small muted">Saving updates the customer, technician and admin portals straight away, together with quotations, invoices, the browser tab icon and the icon people get when they add a portal to their phone's home screen.</p>
+      </div>
+      <div class="brand-preview" id="brand-preview" style="${previewVars(b)}" aria-label="Preview">
+        <div class="bp-top"><span class="bp-mark">${mark}</span><div><b>${esc(co().name)}</b><small>Customer portal</small></div></div>
+        <div class="bp-body"><b>Good morning, Aishath</b><span class="small muted">What can we help you with today?</span>
+          <div class="row"><span class="bp-btn">Book a service</span><span class="bp-chip">12,000 BTU</span></div>
+          <span class="bp-link">View your invoice</span>
+          <div class="bp-app"><span class="bp-icon" style="background:${b.logo&&b.iconBg!=='brand'?'#fff':'var(--pa)'}">${mark}</span><small>${esc((co().name||'').slice(0,14))}</small></div></div>
+      </div>
+    </div></div>`;
+}
+
 function settingsView(){
   const C=co();
-  return `<div class="cols">
+  return brandCard()+`<div class="cols">
     <form class="card" data-form="company"><div class="card-h"><h3>Company information</h3><span class="small muted">Shown on quotations and invoices</span></div><div class="card-b stack">
       <div class="grid2">
         <label class="field"><span>Company name</span><input id="co-name" name="name" value="${esc(C.name)}" required></label>
@@ -249,6 +279,13 @@ function settingsView(){
 
 /* ---------- admin actions ---------- */
 const actions = {
+  brandPreset(el){ const b=brandDraft(); b.color=el.dataset.a.toLowerCase(); b.color2=el.dataset.b.toLowerCase(); render(); },
+  brandIconBg(el){ brandDraft().iconBg=el.dataset.v; render(); },
+  brandLogoRemove(){ brandDraft().logo=''; render(); },
+  brandDefault(){ UI.bd={...DEFAULT_BRAND}; render(); },
+  brandSave(el){ const b=brandDraft(); el.disabled=true;
+    run(async()=>{ await F.setDoc(d('company','brand'), {color:b.color, color2:b.color2, logo:b.logo||'', iconBg:b.iconBg||'white', updatedAt:nowISO()}); UI.bd=null; },
+      'Brand saved. All portals now use it.').finally(()=>el.disabled=false); },
   ptab(el){ UI.ptab=el.dataset.v; UI.sel=''; UI.newJob=null; if(el.dataset.v!=='chat') UI.chatTech=''; saveUI(); render(); },
   filter(el){ UI.filter=el.dataset.v; saveUI(); render(); },
   period(el){ UI.period=el.dataset.v; saveUI(); render(); },
@@ -307,7 +344,26 @@ const forms = {
     const lines = into? [{acct:dd.from,dr:amt},{acct:'3000',cr:amt}] : [{acct:dd.acct,dr:amt},{acct:dd.from,cr:amt}];
     run(async()=>{ await F.addDoc(c('ledger'),{date:dd.date, at:nowISO(), ref:(into?'IN-':'PAY-')+dd.date.replace(/-/g,'').slice(2), memo:dd.memo||name, lines}); f.reset(); }, 'Recorded'); }
 };
-const change = { abCust(){} };
+const change = {
+  abCust(){},
+  async brandLogo(el){ const f=el.files?.[0]; if(!f) return;
+    try{ brandDraft().logo=await readLogo(f); render(); }catch(e){ toast(e.message); el.value=''; } }
+};
+// Colour pickers update the preview live; the page re-renders when the picker closes.
+function setBrandColor(k, v){
+  if(!/^#[0-9a-f]{6}$/i.test(v)) return false;
+  const b=brandDraft(); b[k]=v.toLowerCase();
+  const pv=document.getElementById('brand-preview'); if(pv) pv.setAttribute('style', previewVars(b));
+  const other=document.getElementById(`brand-${k}-hex`); if(other && other!==document.activeElement) other.value=b[k];
+  const pick=document.getElementById(`brand-${k}`); if(pick && pick!==document.activeElement) pick.value=b[k];
+  // Update the theme buttons and the preview icons in place (no redraw, so a click on Save isn't lost).
+  document.querySelectorAll('.swatch').forEach(sw=>sw.setAttribute('aria-pressed', String(sw.dataset.a.toLowerCase()===b.color && sw.dataset.b.toLowerCase()===b.color2)));
+  return true;
+}
+document.addEventListener('input', e=>{ const t=e.target;
+  if(t.dataset.brand) setBrandColor(t.dataset.brand, t.value);
+  if(t.dataset.brandhex){ let v=t.value.trim(); if(v && v[0]!=='#') v='#'+v; setBrandColor(t.dataset.brandhex, v); } });
+
 document.addEventListener('input', e=>{ if(e.target.dataset.input==='cq'){ UI.cq=e.target.value; render(); } });
 
 K.start({view:providerView, actions, forms, change});
