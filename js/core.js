@@ -72,6 +72,102 @@ const PCFG = () => {
   return {customerSignup:true, customerCancel:true, showTechPhone:true, techSeePrices:true, leadDays:0, customerNotice:'', techNotice:'', ...p,
     windows:{morning:true, afternoon:true, evening:true, ...(p.windows||{})}};
 };
+/* ---------- company brand: logo and colours ----------
+   Stored in company/brand (readable before sign-in) and applied to all three portals:
+   header, buttons, links, sign-in page, quotations and invoices, browser tab icon and home-screen icon.
+   The last brand seen is cached on the device so the portal opens in the right colours straight away. */
+const BRAND_PRESETS = [
+  ['Lagoon','#0077B6','#00A08E'], ['Navy','#0B2545','#13579B'], ['Emerald','#047857','#10B981'], ['Crimson','#B91C1C','#F97316'],
+  ['Sunset','#C2410C','#F59E0B'], ['Violet','#5B21B6','#A855F7'], ['Charcoal','#1F2937','#4B5563'], ['Ocean','#0E7490','#22D3EE']
+];
+const hx = h => { h=String(h||'#000').replace('#',''); if(h.length===3) h=h.split('').map(x=>x+x).join(''); const n=parseInt(h,16)||0; return [n>>16&255, n>>8&255, n&255]; };
+const toHex = a => '#'+a.map(v=>Math.round(Math.max(0,Math.min(255,v))).toString(16).padStart(2,'0')).join('');
+const mix = (a,b,t) => { const x=hx(a), y=hx(b); return toHex(x.map((v,i)=>v+(y[i]-v)*t)); };
+const lum = h => { const c=hx(h).map(v=>{ v/=255; return v<=.03928 ? v/12.92 : ((v+.055)/1.055)**2.4; }); return .2126*c[0]+.7152*c[1]+.0722*c[2]; };
+const contrast = (a,b) => { const x=lum(a), y=lum(b); return (Math.max(x,y)+.05)/(Math.min(x,y)+.05); };
+// Nudge a colour towards black or white until it is readable against a background.
+function readable(c, towards, bg, ratio){ let x=c; for(let i=0;i<24 && contrast(x,bg)<ratio;i++) x=mix(x,towards,.1); return x; }
+function brandPalette(b){
+  const A=/^#[0-9a-f]{6}$/i.test(b?.color||'')? b.color : '#0077B6', B=/^#[0-9a-f]{6}$/i.test(b?.color2||'')? b.color2 : A;
+  const main=readable(A,'#000000','#FFFFFF',4.5), heroA=readable(A,'#000000','#FFFFFF',3.2), heroB=readable(B,'#000000','#FFFFFF',3.2);
+  const dmain=readable(A,'#FFFFFF','#0F2231',4.5);
+  return {
+    light:{'--hero-a':heroA,'--hero-b':heroB,'--lagoon':main,'--lagoon-ink':contrast(main,'#FFFFFF')>=4.5?'#FFFFFF':'#0C2233','--lagoon-soft':mix(main,'#FFFFFF',.88)},
+    dark:{'--hero-a':mix(heroA,'#000000',.35),'--hero-b':mix(heroB,'#000000',.35),'--lagoon':dmain,'--lagoon-ink':contrast(dmain,'#04202F')>=4.5?'#04202F':'#FFFFFF','--lagoon-soft':mix(dmain,'#0F2231',.8)},
+    theme:heroA
+  };
+}
+let BRAND = (()=>{ try{ return JSON.parse(localStorage.getItem('acsp-brand')||'null'); }catch(e){ return null; } })();
+function applyBrand(b){
+  BRAND=b||null;
+  try{ b? localStorage.setItem('acsp-brand', JSON.stringify(b)) : localStorage.removeItem('acsp-brand'); }catch(e){}
+  let st=document.getElementById('brand-vars');
+  if(!b || !b.color){ st?.remove(); document.body.removeAttribute('data-brand'); updateIcons(); return; }
+  const p=brandPalette(b), decl=o=>Object.entries(o).map(([k,v])=>`${k}:${v}`).join(';');
+  if(!st){ st=document.createElement('style'); st.id='brand-vars'; document.head.appendChild(st); }
+  st.textContent=`body[data-portal][data-brand]{${decl(p.light)}}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) body[data-portal][data-brand]{${decl(p.dark)}} }
+:root[data-theme="dark"] body[data-portal][data-brand]{${decl(p.dark)}}`;
+  document.body.setAttribute('data-brand','');
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', p.theme);
+  updateIcons();
+}
+// The default mark, in the brand colours, for companies without a logo.
+function defaultMarkSvg(bg1, bg2){
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${bg1}"/><stop offset="1" stop-color="${bg2}"/></linearGradient></defs><rect width="64" height="64" fill="url(#g)"/><rect x="10" y="14" width="44" height="20" rx="6" fill="#fff"/><line x1="17" y1="27" x2="47" y2="27" stroke="${bg1}" stroke-width="3" stroke-linecap="round"/><path d="M20 40c3 3 3 6 0 9M32 40c3 3 3 6 0 9M44 40c3 3 3 6 0 9" stroke="#FFD166" stroke-width="3.5" fill="none" stroke-linecap="round"/></svg>`;
+}
+function loadImg(src){ return new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=()=>rej(new Error("That image can't be read. Try a PNG or JPG.")); i.src=src; }); }
+async function makeIcon(size){
+  const b=BRAND, cv=document.createElement('canvas'); cv.width=cv.height=size; const g=cv.getContext('2d');
+  if(b?.logo){
+    g.fillStyle = b.iconBg==='brand' ? brandPalette(b).theme : '#FFFFFF'; g.fillRect(0,0,size,size);
+    const im=await loadImg(b.logo), pad=size*.14, box=size-pad*2, k=Math.min(box/im.width, box/im.height);
+    g.drawImage(im, (size-im.width*k)/2, (size-im.height*k)/2, im.width*k, im.height*k);
+  } else {
+    const p=b?.color? brandPalette(b) : {light:{'--hero-a':'#0077B6','--hero-b':'#00A08E'}};
+    const im=await loadImg('data:image/svg+xml;charset=utf-8,'+encodeURIComponent(defaultMarkSvg(p.light['--hero-a'], p.light['--hero-b'])));
+    g.drawImage(im,0,0,size,size);
+  }
+  return cv.toDataURL('image/png');
+}
+let iconsT;
+function updateIcons(){
+  clearTimeout(iconsT);
+  iconsT=setTimeout(async()=>{
+    if(!BRAND?.logo && !BRAND?.color) return;   // keep the files in /assets
+    try{
+      const i192=await makeIcon(192), i512=await makeIcon(512);
+      const setLink=(rel, href, extra={})=>{ let l=document.querySelector(`link[rel="${rel}"]`); if(!l){ l=document.createElement('link'); l.rel=rel; document.head.appendChild(l); } l.href=href; Object.entries(extra).forEach(([k,v])=>l.setAttribute(k,v)); };
+      setLink('icon', i192, {type:'image/png'}); setLink('apple-touch-icon', i192);
+      // Home-screen app: name, colours and icon of this company.
+      const nm=S.company?.name || 'AC Service';
+      const man={name:`${nm} · ${PORTAL_NAME[PORTAL]}`, short_name:nm.length>14? nm.slice(0,14) : nm, start_url:new URL(PORTAL_URL[PORTAL],location.href).href, scope:new URL('./',location.href).href,
+        display:'standalone', background_color:'#FFFFFF', theme_color:BRAND.color? brandPalette(BRAND).theme : '#0077B6',
+        icons:[{src:i192,sizes:'192x192',type:'image/png'},{src:i512,sizes:'512x512',type:'image/png'},{src:i512,sizes:'512x512',type:'image/png',purpose:'maskable'}]};
+      setLink('manifest', URL.createObjectURL(new Blob([JSON.stringify(man)],{type:'application/manifest+json'})));
+    }catch(e){ console.warn('brand icons', e); }
+  }, 60);
+}
+// Logos are resized to fit 320×320 and kept small enough to store with the company details.
+async function readLogo(file){
+  if(!/^image\//.test(file.type)) throw new Error('Upload a PNG, JPG, SVG or WebP image of your logo.');
+  const url=URL.createObjectURL(file);
+  try{
+    const im=await loadImg(url), max=320, k=Math.min(1, max/Math.max(im.width||max, im.height||max));
+    const cv=document.createElement('canvas'); cv.width=Math.max(1,Math.round((im.width||max)*k)); cv.height=Math.max(1,Math.round((im.height||max)*k));
+    cv.getContext('2d').drawImage(im,0,0,cv.width,cv.height);
+    let out=cv.toDataURL('image/png');
+    if(out.length>350000) out=cv.toDataURL('image/webp',.9);
+    if(out.length>350000) throw new Error('That logo is too detailed to store. Try a simpler or smaller image.');
+    return out;
+  } finally { URL.revokeObjectURL(url); }
+}
+function setTitle(){
+  const n=(S.inbox||[]).filter(x=>!x.read).length;
+  document.title=(n?`(${n}) `:'')+(S.company?.name ? `${S.company.name} · ${PORTAL_NAME[PORTAL]}` : document.title.replace(/^\(\d+\) /,''));
+}
+if(BRAND) applyBrand(BRAND);
+
 /* ---------- helpers ---------- */
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -398,7 +494,7 @@ function startInbox(){
     const items=snapList(s), prev=new Set((S.inbox||[]).map(x=>x.id));
     if(!first) items.filter(it=>!it.read && !prev.has(it.id)).forEach(alertItem);
     first=false; S.inbox=items; S.loaded.inbox=true;
-    try{ const n=items.filter(x=>!x.read).length; document.title=(n?`(${n}) `:'')+document.title.replace(/^\(\d+\) /,''); n? navigator.setAppBadge?.(n).catch(()=>{}) : navigator.clearAppBadge?.().catch(()=>{}); }catch(e){}
+    try{ const n=items.filter(x=>!x.read).length; setTitle(); n? navigator.setAppBadge?.(n).catch(()=>{}) : navigator.clearAppBadge?.().catch(()=>{}); }catch(e){}
     schedRender();
   }, e=>{ console.warn('inbox',e); S.loaded.inbox=true; schedRender(); }));
 }
@@ -418,7 +514,8 @@ function startAuth(){
   // Public documents every portal needs before sign-in: who owns the portal, company branding, portal settings.
   F.onSnapshot(d('config','owner'), s=>{ OWNER_EXISTS=s.exists(); schedRender(); }, ()=>{ OWNER_EXISTS=true; schedRender(); });
   F.onSnapshot(d('config','portal'), s=>{ S.portal=s.exists()? s.data() : null; S.pub.portal=true; schedRender(); }, ()=>{ S.pub.portal=true; schedRender(); });
-  F.onSnapshot(d('company','profile'), s=>{ S.company=s.exists()? s.data() : null; S.pub.company=true; schedRender(); }, ()=>{ S.pub.company=true; schedRender(); });
+  F.onSnapshot(d('company','profile'), s=>{ S.company=s.exists()? s.data() : null; S.pub.company=true; setTitle(); updateIcons(); schedRender(); }, ()=>{ S.pub.company=true; schedRender(); });
+  F.onSnapshot(d('company','brand'), s=>{ S.brand=s.exists()? s.data() : null; applyBrand(S.brand); schedRender(); }, ()=>{});
   let profUn=null;
   A.onAuthStateChanged(auth, user=>{
     if(profUn){ profUn(); profUn=null; }
@@ -500,7 +597,7 @@ function view(){
   const note = PORTAL==='customer'? PCFG().customerNotice : PORTAL==='technician'? PCFG().techNotice : '';
   return header() + `<main class="wrap">${note?`<div class="notice"><b>${esc(co().name)}:</b> ${esc(note)}</div>`:''}${P.view()}</main>` + bellPanel() + modalView();
 }
-function markSVG(){ return `<svg class="mark" viewBox="0 0 38 38" aria-hidden="true"><rect class="u" x="3" y="6" width="32" height="16" rx="5"/><line class="l" x1="9" y1="17" x2="29" y2="17"/><path class="w" d="M10 27c2 2 2 4 0 6M19 27c2 2 2 4 0 6M28 27c2 2 2 4 0 6"/></svg>`; }
+function markSVG(){ if(BRAND?.logo) return `<img class="mark logo" src="${esc(BRAND.logo)}" alt="">`; return `<svg class="mark" viewBox="0 0 38 38" aria-hidden="true"><rect class="u" x="3" y="6" width="32" height="16" rx="5"/><line class="l" x1="9" y1="17" x2="29" y2="17"/><path class="w" d="M10 27c2 2 2 4 0 6M19 27c2 2 2 4 0 6M28 27c2 2 2 4 0 6"/></svg>`; }
 function brandName(){ return S.company?.name || 'AC Service Portal'; }
 function header(){
   return `<header class="top"><div class="top-in">
@@ -711,7 +808,7 @@ function updateTotals(key){
 function docView(kind, dc, j){
   const C=co(), t=totals(dc), inv=kind==='Invoice', paid=inv && j.payment?.status==='paid';
   return `<div class="doc ${inv?'invoice':''}">
-    <div class="doc-h"><div><h3>${esc(C.name)}</h3><p class="small muted">${esc(C.address)}${C.phone?'<br>'+esc(C.phone):''}${C.email?' · '+esc(C.email):''}${C.tin?'<br>GST TIN '+esc(C.tin):''}</p></div>
+    <div class="doc-h"><div>${BRAND?.logo?`<img class="doc-logo" src="${esc(BRAND.logo)}" alt="${esc(C.name)} logo">`:''}<h3>${esc(C.name)}</h3><p class="small muted">${esc(C.address)}${C.phone?'<br>'+esc(C.phone):''}${C.email?' · '+esc(C.email):''}${C.tin?'<br>GST TIN '+esc(C.tin):''}</p></div>
       <div><div class="doc-kind">${kind}</div><p class="small mono" style="text-align:right">${esc(dc.no)}<br>${inv?'Issued '+fd(dc.issuedAt)+'<br>Due '+fd(dc.dueDate):'Sent '+fd(dc.sentAt)+'<br>Valid until '+fd(dc.validUntil)}</p></div></div>
     <div class="small"><span class="label">Bill to</span><br><b>${esc(j.customerName||'')}</b><br>${esc(j.address||'')}${j.island?', '+esc(j.island):''}${j.customerPhone?' · '+esc(j.customerPhone):''}<br><span class="muted">Ref ${esc(j.no)}</span></div>
     <div class="tscroll"><table><thead><tr><th>Description</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead>
@@ -1197,4 +1294,4 @@ function start(def){
   render();
 }
 
-export { A, ACCTS, ACT, AC_TYPES, BTUS, CHANGE, CLEARED, CONFIG_ERROR, CUR, F, FORMS, GPS, HERO, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, busyTech, c, chatSub, chatThread, chatUnread, clone, co, completeProfileView, copyBtn, createLogin, createMap, createProfile, cust, d, db, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, icon, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, lineEditor, loadUI, log, markChatRead, markSVG, messagesSec, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readReceipt, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, settle, setupView, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateMap, updateTotals, val, view, workSec };
+export { A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CONFIG_ERROR, CUR, F, FORMS, GPS, HERO, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, lineEditor, loadImg, loadUI, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, view, workSec };
