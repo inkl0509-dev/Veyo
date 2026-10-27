@@ -18,6 +18,6 @@ export const SETTINGS = {
   gpsIntervalSec: 12,             // How often a technician's phone sends its position while on a trip.
   // Optional, for alerts while every portal is closed: Firebase console → Project settings → Cloud Messaging
   // → Web Push certificates → Generate key pair, and paste the key here. Also deploy the function in /functions.
-  vapidKey: ""
+  vapidKey: "BKh5wbsUKBVVkkcjuN4s1gyvR-xKqIAAgtwrPfINw_-b6Y9O2FTfeBIUswTcDhyDxq5urg-NLjUfMS4W-2M2QXc"
 };
 
