@@ -496,3 +496,19 @@ body[data-portal="customer"] .wrap{max-width:1020px}
 .list-sub{flex-direction:row;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding-block:10px;background:var(--surface-2)}
 .list-sub.warm{background:var(--mango-soft)}
 .list-sub.orchid{background:var(--orchid-soft)}
+
+/* ---------- office ↔ technician chat ---------- */
+.chat{display:flex;flex-direction:column;height:min(78vh,760px);min-height:420px}
+.chat-pane .chat{height:calc(100vh - 220px)}
+.chat-h{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,var(--lagoon-soft),transparent)}
+.chat-h>div{display:flex;flex-direction:column}
+.back-chat{display:none}
+@media (max-width:900px){ .back-chat{display:inline-flex} body[data-portal="technician"] .back-chat{display:none} }
+.chat-thread{flex:1;max-height:none;padding:14px 16px;background:var(--bg)}
+.chat-compose{display:flex;flex-direction:column;gap:8px;padding:12px 16px;border-top:1px solid var(--line);background:var(--surface)}
+.chat-job{max-width:100%;font-size:.86rem;padding:6px 10px}
+.job-chip{align-self:flex-start;border:0;border-radius:999px;padding:2px 9px;font:800 .72rem var(--f-mono);background:var(--orchid-soft);color:var(--orchid-text);cursor:pointer}
+.msg.mine .job-chip{background:rgba(255,255,255,.22);color:inherit}
+.avatar.sm{width:30px;height:30px;font-size:.78rem}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@media (max-width:760px){ .chat,.chat-pane .chat{height:calc(100vh - 190px)} }
