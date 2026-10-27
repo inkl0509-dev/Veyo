@@ -1,0 +1,168 @@
+rules_version = '2';
+
+// Roles live in users/{uid}.role: "provider" (the office), "technician" or "customer".
+// The first account created in the admin portal becomes the provider (config/owner records it).
+// After that, the provider creates technician and staff logins and controls both portals (config/portal).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function userDoc() { return /databases/$(database)/documents/users/$(uid()); }
+    function role() { return exists(userDoc()) ? get(userDoc()).data.role : ''; }
+    function isProvider() { return signedIn() && role() == 'provider'; }
+    function isTech() { return signedIn() && role() == 'technician'; }
+    // The admin can pause any customer or technician login (users/{uid}.status = "paused").
+    function isActive() { return exists(userDoc()) && get(userDoc()).data.get('status', 'active') == 'active'; }
+    function portalDoc() { return /databases/$(database)/documents/config/portal; }
+    function portalSetting(name) { return !exists(portalDoc()) || get(portalDoc()).data.get(name, true) == true; }
+    function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
+    function onlyChanged(keys) { return changed().hasOnly(keys); }
+
+    // ---------- people ----------
+    match /config/owner {
+      allow read: if true;
+      allow create: if signedIn()
+        && !exists(/databases/$(database)/documents/config/owner)
+        && request.resource.data.uid == uid()
+        && getAfter(userDoc()).data.role == 'provider';
+      allow update, delete: if false;
+    }
+
+    // Settings the admin controls for the customer and technician portals. Read before sign-in.
+    match /config/portal {
+      allow read: if true;
+      allow write: if isProvider();
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && (userId == uid() || isProvider());
+      allow create: if isProvider() || (signedIn() && userId == uid() && request.resource.data.get('status', 'active') == 'active' && (
+        (request.resource.data.role == 'customer' && portalSetting('customerSignup'))
+        || (request.resource.data.role == 'provider'
+            && !exists(/databases/$(database)/documents/config/owner)
+            && getAfter(/databases/$(database)/documents/config/owner).data.uid == uid())
+      ));
+      // People can edit their own name/phone but never their own role or status. The office can change both.
+      allow update: if signedIn() && (
+        isProvider()
+        || (userId == uid() && isActive() && !changed().hasAny(['role','status','email']))
+      );
+      allow delete: if false;
+    }
+
+    match /customers/{customerId} {
+      allow read: if signedIn() && (customerId == uid() || isProvider());
+      allow create: if signedIn() && (customerId == uid() || isProvider());
+      allow update: if signedIn() && ((customerId == uid() && isActive()) || isProvider());
+      allow delete: if isProvider();
+    }
+
+    match /techs/{techId} {
+      allow read: if signedIn();
+      allow write: if isProvider();
+    }
+
+    // ---------- business settings ----------
+    match /company/{docId} {
+      allow read: if true;   // name, contact and bank details show on the sign-in pages and invoices
+      allow write: if isProvider();
+    }
+    match /services/{serviceId} {
+      allow read: if signedIn();
+      allow write: if isProvider();
+    }
+
+    // Running numbers for requests, quotations and invoices. Only ever goes up by one.
+    match /counters/{name} {
+      allow read: if signedIn();
+      allow create: if signedIn() && (name == 'jobs' || isProvider()) && request.resource.data.n == 1;
+      allow update: if signedIn() && (name == 'jobs' || isProvider()) && request.resource.data.n == resource.data.n + 1;
+    }
+
+    // ---------- jobs ----------
+    function jobData(jobId) { return get(/databases/$(database)/documents/jobs/$(jobId)).data; }
+    function canSeeJob(j) { return isProvider() || j.customerId == uid() || j.get('techId', '') == uid(); }
+
+    match /jobs/{jobId} {
+      allow read: if signedIn() && (isProvider()
+        || resource.data.customerId == uid()
+        || resource.data.get('techId', '') == uid());
+
+      // Customers create their own requests, with nothing the office controls already filled in.
+      allow create: if signedIn() && (isProvider() || (
+        request.resource.data.customerId == uid() && isActive()
+        && request.resource.data.keys().hasOnly(['no','customerId','customerName','customerPhone','serviceIds','units','acType','btu','preferredDate','window','island','address','issue','dest','createdAt'])
+      ));
+
+      allow update: if signedIn() && (
+        isProvider()
+        || (resource.data.customerId == uid() && isActive() && customerUpdateOk())
+        || (isTech() && isActive() && resource.data.get('techId', '') == uid()
+            && onlyChanged(['departedAt','etaMins','arrivedAt','finishedAt','workNotes','parts','loc','trail']))
+      );
+      allow delete: if isProvider();
+
+      function customerUpdateOk() {
+        return onlyChanged(['quote','payment','rating','cancelled'])
+          && (!changed().hasAny(['quote']) || quoteAnswerOk())
+          && (!changed().hasAny(['payment']) || paymentOk())
+          && (!changed().hasAny(['rating']) || ratingOk())
+          && (!changed().hasAny(['cancelled']) || cancelOk());
+      }
+      // The customer may only accept or decline a quotation that is waiting for them.
+      function quoteAnswerOk() {
+        return resource.data.quote.status == 'sent'
+          && request.resource.data.quote.status in ['accepted','declined']
+          && request.resource.data.quote.diff(resource.data.quote).affectedKeys().hasOnly(['status','reason','respondedAt']);
+      }
+      // One payment per invoice, for the exact invoice total.
+      // Bank transfers are posted straight to the books (with a matching ledger entry in the same batch)
+      // and flagged for the office to verify. Cash and card on site wait for the office to confirm.
+      function paymentOk() {
+        let p = request.resource.data.payment;
+        return resource.data.get('payment', null) == null
+          && resource.data.get('invoice', null) != null
+          && p.amount == resource.data.invoice.total
+          && ((p.status == 'pending' && p.method in ['cash','card'])
+              || (p.status == 'paid' && p.method in ['bml','mib'] && p.verified == false
+                  && existsAfter(/databases/$(database)/documents/ledger/$('pay-' + jobId))));
+      }
+      function ratingOk() {
+        return resource.data.get('rating', null) == null
+          && resource.data.get('finishedAt', null) != null
+          && request.resource.data.rating.stars is int
+          && request.resource.data.rating.stars >= 1 && request.resource.data.rating.stars <= 5;
+      }
+      function cancelOk() {
+        return portalSetting('customerCancel') && resource.data.get('departedAt', null) == null && request.resource.data.cancelled == true;
+      }
+
+      // Messages and activity log: anyone on the job can read and add; nobody can edit history.
+      match /messages/{messageId} {
+        allow read: if signedIn() && canSeeJob(jobData(jobId));
+        allow create: if signedIn() && (isProvider() || isActive()) && canSeeJob(jobData(jobId))
+          && request.resource.data.uid == uid()
+          && request.resource.data.text is string && request.resource.data.text.size() <= 4000;
+        allow update, delete: if false;
+      }
+    }
+
+    // ---------- accounting ----------
+    match /ledger/{entryId} {
+      allow read, write: if isProvider();
+      // A customer's bank-transfer payment posts its own entry: cash/bank debit, receivable credit, for the invoice total.
+      allow create: if signedIn() && isActive() && customerPaymentEntryOk(entryId);
+    }
+    function customerPaymentEntryOk(entryId) {
+      let e = request.resource.data;
+      let j = jobData(e.jobId);
+      return entryId == 'pay-' + e.jobId
+        && j.customerId == uid()
+        && j.get('invoice', null) != null
+        && e.lines.size() == 2
+        && e.lines[0].acct in ['1010','1020'] && e.lines[0].dr == j.invoice.total
+        && e.lines[1].acct == '1100' && e.lines[1].cr == j.invoice.total;
+    }
+  }
+}
