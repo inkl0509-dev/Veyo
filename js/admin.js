@@ -2,14 +2,16 @@
 import * as K from './core.js';
 const { S, ME, UI, F, db, ACCTS, METHODS, WINDOWS, CUR, PORTAL_URL, PORTAL_NAME, portalLink,
   esc, money, r2, fd, fdt, today, addDays, nowISO, initials, stars, avgRating, hint, stage, jobTitle, job, sv, co, PCFG,
-  balances, sideBal, pill, jobItem, jobDetail, run, toast, render, saveUI, d, c, log, event, createLogin, pickDefault, val } = K;
+  balances, sideBal, pill, jobItem, jobDetail, run, toast, render, saveUI, d, c, log, event, createLogin, pickDefault, val, chatThread, chatUnread, ago } = K;
 
 function providerView(){
   const n=S.jobs.filter(j=>hint(j)).length;
-  const tabs=[['jobs','Service requests',n],['customers','Customers'],['team','Team'],['portals','Portal controls'],['accounting','Accounting'],['settings','Company & services']];
+  const unreadChats=S.techs.filter(t=>chatUnread(t.id)).length;
+  const tabs=[['jobs','Service requests',n],['chat','Team chat',unreadChats],['customers','Customers'],['team','Team'],['portals','Portal controls'],['accounting','Accounting'],['settings','Company & services']];
   let h=`<nav class="tabs" role="tablist">${tabs.map(([k,l,cnt])=>`<button role="tab" aria-selected="${UI.ptab===k}" data-act="ptab" data-v="${k}">${l}${cnt?`<span class="count">${cnt}</span>`:''}</button>`).join('')}</nav>`;
   if(!S.services.length || !S.company?.address) h+=`<div class="notice"><b>Finish setting up.</b> Add your address, GST TIN, bank accounts, office location and the services you offer. Customers see them when booking and on every quotation and invoice. <button class="linkbtn" data-act="ptab" data-v="settings">Open company settings</button></div>`;
   if(UI.ptab==='jobs') h+= UI.newJob ? newJobForm() : providerJobs();
+  else if(UI.ptab==='chat') h+=chatTab();
   else if(UI.ptab==='customers') h+=customersView();
   else if(UI.ptab==='team') h+=teamView();
   else if(UI.ptab==='portals') h+=portalsView();
@@ -33,6 +35,20 @@ function providerJobs(){
       ${list.length?`<ul class="joblist">${list.map(j=>jobItem(j,j.id===UI.sel)).join('')}</ul>`:`<div class="empty"><h3>${f==='action'?'Nothing needs you right now':'No requests here'}</h3><p>Requests from the customer portal appear here. Take phone bookings with "New request".</p></div>`}
     </section>
     <section class="pane detail-pane">${sel?jobDetail(sel):`<div class="empty"><h3>Pick a request</h3><p>Choose a request to schedule it, quote, assign a technician, follow the trip and invoice.</p></div>`}</section></div>`;
+}
+/* Private chat with each technician. */
+function chatTab(){
+  const rows=S.techs.map(t=>({t, ch:S.chats.find(x=>x.id===t.id)})).sort((a,b)=>(b.ch?.lastAt||'').localeCompare(a.ch?.lastAt||'') || String(a.t.name).localeCompare(b.t.name));
+  const sel=UI.chatTech && S.techs.find(t=>t.id===UI.chatTech);
+  return `<div class="split ${sel?'has-sel':''}">
+    <section class="pane list-pane"><div class="pane-head"><h2>Team chat</h2><p class="small muted">Private between the office and each technician. Customers never see it.</p></div>
+      ${rows.length?`<ul class="joblist">${rows.map(({t,ch})=>{ const un=chatUnread(t.id), active=S.jobs.find(j=>j.techId===t.id&&j.departedAt&&!j.finishedAt&&!j.cancelled);
+        return `<li><button data-act="openChat" data-id="${t.id}" aria-current="${t.id===UI.chatTech}">
+          <span class="jl-top"><span class="row" style="gap:8px;flex-wrap:nowrap;min-width:0"><span class="avatar sm">${initials(t.name)}</span><b class="${un?'':'jl-name'}">${esc(t.name)}</b></span><small class="muted">${ch?.lastAt?ago(ch.lastAt):''}</small></span>
+          <span class="jl-meta" style="${un?'color:var(--ink);font-weight:700':''}">${ch?.lastText?(ch.lastRole==='provider'?'Office: ':'')+esc(ch.lastText):'No messages yet'}</span>
+          ${un?'<span class="jl-hint">New message</span>':active?`<span class="small" style="color:var(--teal-text);font-weight:700">${active.arrivedAt?'On site':'On the way'} · ${esc(active.no)}</span>`:''}</button></li>`; }).join('')}</ul>`
+        :`<div class="empty"><p>Add technicians in the Team tab to chat with them.</p></div>`}</section>
+    <section class="pane detail-pane">${sel?chatThread(sel.id):`<div class="empty"><h3>Pick a technician</h3><p>Send instructions, share job details, or answer their questions. Each message sends them an alert.</p></div>`}</section></div>`;
 }
 /* Phone or walk-in booking made by the office for a customer. */
 function newJobForm(){
@@ -233,7 +249,7 @@ function settingsView(){
 
 /* ---------- admin actions ---------- */
 const actions = {
-  ptab(el){ UI.ptab=el.dataset.v; UI.sel=''; UI.newJob=null; saveUI(); render(); },
+  ptab(el){ UI.ptab=el.dataset.v; UI.sel=''; UI.newJob=null; if(el.dataset.v!=='chat') UI.chatTech=''; saveUI(); render(); },
   filter(el){ UI.filter=el.dataset.v; saveUI(); render(); },
   period(el){ UI.period=el.dataset.v; saveUI(); render(); },
   gotoJob(el){ UI.ptab='jobs'; UI.filter='all'; UI.sel=el.dataset.id; UI.newJob=null; saveUI(); render(); scrollTo(0,0); },
