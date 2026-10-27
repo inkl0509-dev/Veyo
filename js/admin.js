@@ -2,7 +2,7 @@
 import * as K from './core.js';
 const { S, ME, UI, F, db, ACCTS, METHODS, WINDOWS, CUR, PORTAL_URL, PORTAL_NAME, portalLink,
   esc, money, r2, fd, fdt, today, addDays, nowISO, initials, stars, avgRating, hint, stage, jobTitle, job, sv, co, PCFG,
-  balances, sideBal, pill, jobItem, jobDetail, run, toast, render, saveUI, d, c, log, createLogin, pickDefault, val } = K;
+  balances, sideBal, pill, jobItem, jobDetail, run, toast, render, saveUI, d, c, log, event, createLogin, pickDefault, val } = K;
 
 function providerView(){
   const n=S.jobs.filter(j=>hint(j)).length;
@@ -279,11 +279,11 @@ const forms = {
   adminBook(f,dd,fdata){ const cu=S.customers.find(x=>x.id===dd.customerId), svcs=fdata.getAll('svc');
     if(!cu) return toast('Choose a customer.'); if(!svcs.length) return toast('Choose at least one service.');
     run(async()=>{ const ref=F.doc(c('jobs'));
-      await F.runTransaction(db, async tx=>{ const cref=d('counters','jobs'), cs=await tx.get(cref), n=(cs.exists()?cs.data().n:0)+1; tx.set(cref,{n});
+      const created=await F.runTransaction(db, async tx=>{ const cref=d('counters','jobs'), cs=await tx.get(cref), n=(cs.exists()?cs.data().n:0)+1; tx.set(cref,{n});
         const data={no:'SR-'+(1000+n), customerId:cu.id, customerName:cu.name, customerPhone:cu.phone||'', serviceIds:svcs, units:+dd.units||1, acType:dd.acType, btu:dd.btu, preferredDate:dd.date, window:dd.window, island:cu.island||'', address:cu.address||'', issue:dd.issue||'', createdAt:nowISO(), bookedBy:'office'};
         if(cu.lat!=null) data.dest={lat:cu.lat,lng:cu.lng};
-        tx.set(ref,data); });
-      await log(ref.id,'Request booked by the office');
+        tx.set(ref,data); return data; });
+      await event({...created, id:ref.id},'Request booked by the office for you',['customer'],'Service request booked');
       UI.newJob=null; UI.filter='all'; UI.sel=ref.id; saveUI(); }, 'Request created'); },
   expense(f,dd){ const amt=r2(dd.amount); if(amt<=0) return;
     const into = dd.acct==='3000';
