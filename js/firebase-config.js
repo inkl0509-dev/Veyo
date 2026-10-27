@@ -9,10 +9,15 @@ export const firebaseConfig = {
   appId: "1:1077941044759:web:8c8609130d2234dfc9fe52",
   measurementId: "G-9CF89VLC5M"
 };
+// App settings you can change.
 export const SETTINGS = {
   currency: "MVR",
   timeZone: "Indian/Maldives",
-  mapCenter: [4.1755, 73.5093],
-  avgSpeedKmh: 22,
-  gpsIntervalSec: 12
+  mapCenter: [4.1755, 73.5093],   // Malé. Used until you pin your office in Company settings.
+  avgSpeedKmh: 22,                // Used to estimate arrival time from the technician's GPS position.
+  gpsIntervalSec: 12,             // How often a technician's phone sends its position while on a trip.
+  // Optional, for alerts while every portal is closed: Firebase console → Project settings → Cloud Messaging
+  // → Web Push certificates → Generate key pair, and paste the key here. Also deploy the function in /functions.
+  vapidKey: ""
 };
+
