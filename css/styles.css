@@ -489,3 +489,10 @@ body[data-portal="customer"] .wrap{max-width:1020px}
 @media (max-width:480px){ .rv-row{grid-template-columns:minmax(0,1fr) auto} .rv-row .label{grid-column:1/-1} }
 .est-box{display:flex;flex-direction:column;gap:8px;padding:14px;border-radius:var(--r-sm);background:var(--lagoon-soft)}
 .est-box .tot{margin-left:0;width:100%}
+
+/* ---------- job assignment ---------- */
+.assign-box{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:12px}
+.assign-box>.stack{padding:12px 14px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface-2);gap:6px}
+.list-sub{flex-direction:row;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding-block:10px;background:var(--surface-2)}
+.list-sub.warm{background:var(--mango-soft)}
+.list-sub.orchid{background:var(--orchid-soft)}
