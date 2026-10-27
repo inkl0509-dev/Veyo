@@ -47,7 +47,7 @@ const WINDOWS = {morning:'Morning, 8am to 12pm', afternoon:'Afternoon, 12pm to 4
 const AC_TYPES = ['Split wall unit','Cassette unit','Window unit','Ducted / central','Portable'];
 const BTUS = ['9,000 BTU','12,000 BTU','18,000 BTU','24,000 BTU','30,000+ BTU','Not sure'];
 const ST = {requested:['New request','coral'],scheduled:['Scheduled','lagoon'],quoted:['Quote sent','orchid'],declined:['Quote declined','coral'],
-  approved:['Quote approved','orchid'],assigned:['Technician assigned','lagoon'],enroute:['On the way','live'],onsite:['On site','live'],
+  approved:['Quote approved','orchid'],offered:['Open to technicians','orchid'],awaiting:['Waiting for technician','mango'],assigned:['Technician assigned','lagoon'],enroute:['On the way','live'],onsite:['On site','live'],
   completed:['Work finished','mango'],invoiced:['Invoice sent','mango'],paid:['Paid','teal'],cancelled:['Cancelled','mute']};
 const STEPS = ['Requested','Scheduled','Quoted','Assigned','On the way','Finished','Paid'];
 const SVC_ICONS = [
@@ -97,7 +97,9 @@ const co = () => Object.assign({name:'Your AC company', tagline:'Air-conditionin
 const sv = id => S.services.find(x=>x.id===id);
 const cust = id => S.customers.find(x=>x.id===id);
 const tech = id => S.techs.find(x=>x.id===id);
-const job = id => S.jobs.find(x=>x.id===id);
+const job = id => S.jobs.find(x=>x.id===id) || (S.openJobs||[]).find(x=>x.id===id);
+// A job sent to one technician waits for them to accept it. Older jobs without assignStatus count as accepted.
+const accepted = j => !!j.techId && (j.assignStatus||'accepted')==='accepted';
 const jobTitle = j => (j.serviceIds||[]).map(id=>sv(id)?.name).filter(Boolean).join(', ') || 'AC service';
 const myCustomer = () => S.customers.find(x=>x.id===ME.user?.uid);
 
@@ -108,7 +110,9 @@ function stage(j){
   if(j.finishedAt) return 'completed';
   if(j.arrivedAt) return 'onsite';
   if(j.departedAt) return 'enroute';
+  if(j.techId && !accepted(j)) return 'awaiting';
   if(j.techId) return 'assigned';
+  if(j.open) return 'offered';
   if(j.quote?.status==='accepted') return 'approved';
   if(j.quote?.status==='declined') return 'declined';
   if(j.quote) return 'quoted';
@@ -121,10 +125,12 @@ function pill(j){
   if(s==='invoiced' && j.payment?.status==='pending'){ l=METHODS[j.payment.method]?.n+' due'; t='coral'; }
   else if(s==='invoiced' && overdue(j)){ l='Overdue'; t='bad'; }
   else if(s==='paid' && j.payment?.verified===false && ME.role==='provider'){ l='Paid · verify'; t='mango'; }
+  else if(s==='awaiting' && ME.role==='technician'){ l='New: accept or decline'; t='coral'; }
   return `<span class="pill ${t}">${esc(l)}</span>`;
 }
 function hint(j){
   const s=stage(j);
+  if(!j.cancelled && !j.techId && !j.open && j.assignStatus==='declined' && !j.departedAt) return 'Technician declined: assign again';
   if(s==='requested') return 'Confirm a time';
   if(s==='declined') return 'Revise the quotation';
   if(s==='scheduled') return 'Send a quote or assign';
@@ -195,6 +201,12 @@ async function notify(j, parties, title, body){
     for(const rid of to) b.set(F.doc(c('inbox',rid,'items')), {title, body, jobId:j.id, jobNo:j.no||'', at:nowISO(), read:false, from:ME.user.uid, fromName:myName(), portal:portalOfRecipient(j,rid)});
     await b.commit();
   }catch(e){ console.warn('notify', e); }
+}
+async function notifyTo(j, rids, title, body){
+  rids=rids.filter(r=>r && r!==ME.user?.uid); if(!rids.length) return;
+  try{ for(let i=0;i<rids.length;i+=400){ const b=F.writeBatch(db);
+      for(const rid of rids.slice(i,i+400)) b.set(F.doc(c('inbox',rid,'items')), {title, body, jobId:j.id, jobNo:j.no||'', at:nowISO(), read:false, from:ME.user.uid, fromName:myName(), portal:'technician'});
+      await b.commit(); } }catch(e){ console.warn('notify', e); }
 }
 /** Record a step in the job's activity log and notify the other parties. */
 async function event(j, text, parties, title){ await log(j.id, text); await notify(j, parties, title, `${j.no?j.no+' · ':''}${text}`); }
@@ -300,7 +312,7 @@ async function nextNumber(name){
 /* ---------- subscriptions ---------- */
 let unsubs=[], subRole=null, msgSub={id:null, un:null};
 function stopSubs(){ unsubs.forEach(u=>{ try{u();}catch(e){} }); unsubs=[]; subRole=null; if(msgSub.un) msgSub.un(); msgSub={id:null,un:null};
-  Object.assign(S,{services:[],techs:[],customers:[],users:[],jobs:[],ledger:[],inbox:[],msgs:{},loaded:{},need:[]}); }
+  Object.assign(S,{services:[],techs:[],customers:[],users:[],jobs:[],openJobs:[],ledger:[],inbox:[],msgs:{},loaded:{},need:[]}); }
 function subCol(key, q, map=snapList){ S.need.push(key); unsubs.push(F.onSnapshot(q, s=>{ S[key]=map(s); S.loaded[key]=true; schedRender(); }, e=>{ console.error(key,e); S.loaded[key]=true; toast(errMsg(e)); schedRender(); })); }
 function startSubs(){
   const role=ME.role, uid=ME.user.uid;
@@ -313,6 +325,7 @@ function startSubs(){
     subCol('jobs', F.query(c('jobs'), F.where('customerId','==',uid)));
   } else if(role==='technician'){
     subCol('jobs', F.query(c('jobs'), F.where('techId','==',uid)));
+    subCol('openJobs', F.query(c('jobs'), F.where('open','==',true)));
   }
   startInbox();
   registerPush();
@@ -329,7 +342,9 @@ function startInbox(){
   }, e=>{ console.warn('inbox',e); S.loaded.inbox=true; schedRender(); }));
 }
 function syncMsgSub(){
-  const id = UI.sel && job(UI.sel) ? UI.sel : null;
+  const sj = UI.sel && job(UI.sel);
+  // A technician only reads messages on jobs they have; an open job they haven't taken has none for them.
+  const id = sj && (ME.role!=='technician' || sj.techId===ME.user.uid) ? sj.id : null;
   if(msgSub.id===id) return;
   if(msgSub.un) msgSub.un(); msgSub={id, un:null};
   if(!id) return;
@@ -514,16 +529,40 @@ function completeProfileView(kind){
     <button class="btn primary block">Continue</button><button type="button" class="linkbtn" data-act="signOut">Use a different account</button></form></section></div>`;
 }
 function jobItem(j, cur){
-  const role=ME.role, t=tech(j.techId), hn=role==='provider'? hint(j) : '';
+  const role=ME.role, t=tech(j.techId); let hn=role==='provider'? hint(j) : '';
+  if(role==='technician' && j.open && j.techId!==ME.user.uid) return `<li><button data-act="openJob" data-id="${j.id}" aria-current="${cur}">
+    <span class="jl-top"><span class="mono">${esc(j.no)}</span><span class="pill orchid">Open job</span></span>
+    <span class="jl-name">${esc(jobTitle(j))}</span>
+    <span class="jl-meta">${esc(j.island||'')} · ${j.units||1} × ${esc(j.acType||'AC')} · ${j.slot?slotText(j.slot):'asked for '+fd(j.preferredDate)}</span>
+    <span class="jl-hint" style="color:var(--orchid-text)">Take this job</span></button></li>`;
+  if(role==='technician' && stage(j)==='awaiting') hn='Accept or decline';
   return `<li><button data-act="openJob" data-id="${j.id}" aria-current="${cur}">
     <span class="jl-top"><span class="mono">${esc(j.no)}</span>${pill(j)}</span>
     <span class="jl-name">${role==='customer'? esc(jobTitle(j)) : esc(j.customerName||'Customer')}</span>
     <span class="jl-meta">${role==='customer'?'':esc(jobTitle(j))+' · '}${esc(j.island||'')}${j.slot?' · '+slotText(j.slot):j.preferredDate?' · asked for '+fd(j.preferredDate):''}${t&&role!=='technician'?' · '+esc(t.name):''}</span>
     ${hn?`<span class="jl-hint">${hn}</span>`:''}</button></li>`;
 }
+/* What a technician sees of an open job before taking it: the work, area and time, not the exact address or phone. */
+function openJobDetail(j){
+  const other=S.jobs.find(x=>x.techId===ME.user.uid && x.slot && j.slot && x.slot.date===j.slot.date && !x.finishedAt && !x.cancelled);
+  return `<div class="jd-head"><div><button class="btn sm back" data-act="closeJob">← Back</button></div>
+    <div class="jd-title"><span class="mono">${esc(j.no)}</span><span class="pill orchid">Open job</span></div><h2>${esc(jobTitle(j))}</h2>
+    <p class="muted small">Offered to all technicians ${j.offerAt?fdt(j.offerAt):''}</p></div>
+    <div class="sec"><div class="next"><h3>Want this job?</h3>
+      <p class="small">The first technician to take it gets it. The office and the customer are told straight away, and the full address and contact details appear in your jobs.</p>
+      ${other?`<p class="small"><b>Note:</b> you already have ${esc(other.no)} on ${fd(other.slot.date)}.</p>`:''}
+      <div class="row"><button class="btn teal lg" data-act="takeJob" data-id="${j.id}">Take this job</button></div></div></div>
+    <div class="sec"><h3>The work</h3><div class="kv">
+      <div><span class="label">When</span><b>${j.slot?slotText(j.slot):fd(j.preferredDate)+(j.window?', '+esc(WINDOWS[j.window].split(',')[0].toLowerCase()):'')}</b></div>
+      <div><span class="label">Area</span><b>${esc(j.island||'')}</b></div>
+      <div><span class="label">AC units</span><b>${esc(j.units||1)} × ${esc(j.acType||'AC')}</b></div>
+      <div><span class="label">Capacity</span><b>${esc(j.btu||'Not given')}</b></div></div>
+      ${j.issue?`<div class="callout"><span class="label">Customer's description</span><p>${esc(j.issue)}</p></div>`:''}</div>`;
+}
 /* ---------- job detail ---------- */
 function jobDetail(j){
   const role=ME.role, s=stage(j);
+  if(role==='technician' && j.techId!==ME.user.uid) return openJobDetail(j);
   let h=`<div class="jd-head"><div><button class="btn sm back" data-act="closeJob">← Back</button></div>
     <div class="jd-title"><span class="mono">${esc(j.no)}</span>${pill(j)}</div><h2>${esc(jobTitle(j))}</h2>
     <p class="muted small">${esc(j.customerName||'')}${j.customerPhone?' · '+esc(j.customerPhone):''} · ${esc(j.address||'')}${j.island?', '+esc(j.island):''} · Requested ${fdt(j.createdAt)}</p></div>`;
@@ -537,7 +576,7 @@ function jobDetail(j){
   return h;
 }
 function tracker(j){
-  const done=[true, !!j.slot, !!j.quote, !!j.techId, !!j.departedAt, !!j.finishedAt, j.payment?.status==='paid'];
+  const done=[true, !!j.slot, !!j.quote, accepted(j), !!j.departedAt, !!j.finishedAt, j.payment?.status==='paid'];
   const cur=done.indexOf(false);
   return `<div class="trk" aria-label="Progress">${STEPS.map((l,i)=>`<div class="${done[i]?'done':i===cur?'cur':''}"><i></i>${l}</div>`).join('')}</div>`;
 }
@@ -619,20 +658,33 @@ function docView(kind, dc, j){
 }
 function techSec(j){
   const role=ME.role; if(role==='technician') return '';
-  const t=tech(j.techId);
-  let h=`<div class="sec"><h3>Technician</h3>`;
-  if(t){ const ar=avgRating(t.id); h+=`<div class="row"><span class="avatar">${initials(t.name)}</span><div><b>${esc(t.name)}</b><p class="small muted">${role==='customer' && !PCFG().showTechPhone ? '' : esc(t.phone||'')}${ar?' · '+stars(ar.avg)+' '+ar.avg.toFixed(1):''}</p></div></div>`; }
+  const t=tech(j.techId), showT = t && (role==='provider' || accepted(j));
+  let h=`<div class="sec"><div class="sec-h"><h3>Technician</h3>${role==='provider'&&j.techId?(accepted(j)?`<span class="pill teal">Accepted ${j.acceptedAt?ft(j.acceptedAt):''}</span>`:`<span class="pill mango">Waiting for ${esc(t?.name?.split(' ')[0]||'technician')} to accept</span>`):role==='provider'&&j.open?'<span class="pill orchid">Open to all technicians</span>':''}</div>`;
+  if(showT){ const ar=avgRating(t.id); h+=`<div class="row"><span class="avatar">${initials(t.name)}</span><div><b>${esc(t.name)}</b><p class="small muted">${role==='customer' && !PCFG().showTechPhone ? '' : esc(t.phone||'')}${ar?' · '+stars(ar.avg)+' '+ar.avg.toFixed(1):''}</p></div></div>`; }
+  if(role==='provider'){
+    if(j.declined && !j.techId) h+=`<div class="callout coral"><b>${esc(j.declined.name)} declined this job</b><p class="small">${fdt(j.declined.at)}${j.declined.reason?' · “'+esc(j.declined.reason)+'”':''}</p></div>`;
+    if(j.open) h+=`<div class="callout"><p class="small">Offered to every technician ${j.offerAt?'since '+fdt(j.offerAt):''}. The first one to take it gets it, and you'll be notified.</p><div><button class="btn sm" data-act="stopOffer" data-id="${j.id}">Stop offering</button></div></div>`;
+  }
   if(role==='provider' && !j.departedAt && !j.cancelled){
-    if(!S.techs.length) h+=`<p class="muted">Add technicians in the Technicians tab to assign this job.</p>`;
-    else h+=`<div class="row"><select id="as-${j.id}" aria-label="Choose technician" style="max-width:280px">${S.techs.map(x=>`<option value="${x.id}" ${x.id===j.techId?'selected':''}>${esc(x.name)}${busyTech(x.id,j.id)?' (on a job)':''}</option>`).join('')}</select><button class="btn ${t?'':'primary'}" data-act="assign" data-id="${j.id}">${t?'Reassign':'Assign job'}</button></div>`;
-  } else if(!t) h+=`<p class="muted">A technician will be assigned before your visit.</p>`;
+    if(!S.techs.length) h+=`<p class="muted">Add technicians in the Team tab to assign this job.</p>`;
+    else h+=`<div class="assign-box">
+      <div class="stack"><span class="label">Send to one technician</span><p class="small muted">They get an alert and must accept the job.</p>
+        <div class="row"><select id="as-${j.id}" aria-label="Choose technician" style="max-width:260px">${S.techs.map(x=>`<option value="${x.id}" ${x.id===j.techId?'selected':''}>${esc(x.name)}${busyTech(x.id,j.id)?' (on a job)':''}</option>`).join('')}</select>
+        <button class="btn ${j.techId?'':'primary'}" data-act="assign" data-id="${j.id}">${j.techId?'Send to someone else':'Send job'}</button></div></div>
+      ${j.open?'':`<div class="stack"><span class="label">Or offer to every technician</span><p class="small muted">All technicians get an alert. The first to take it gets the job.</p>
+        <div><button class="btn" data-act="offerAll" data-id="${j.id}">Offer to all technicians</button></div></div>`}</div>`;
+  } else if(!showT) h+=`<p class="muted">${j.techId||j.open?"We're confirming your technician now.":'A technician will be assigned before your visit.'}</p>`;
   return h+`</div>`;
 }
 const busyTech = (tid, except) => S.jobs.some(j=>j.id!==except && j.techId===tid && j.departedAt && !j.finishedAt && !j.cancelled);
 function techNext(j){
   const s=stage(j); let h=`<div class="sec"><div class="next">`;
   const other=myActiveTrip();
-  if(['assigned','scheduled','quoted','approved'].includes(s) && other && other.id!==j.id){
+  if(s==='awaiting'){
+    h+=`<h3>New job for you</h3><p class="small">The office sent you this job${j.assignedAt?' at '+ft(j.assignedAt):''}. Accept it to add it to your jobs, or decline so it can go to someone else.</p>
+      <label class="field"><span>Reason, if you decline (optional)</span><input id="dr-${j.id}" placeholder="e.g. Already booked that morning"></label>
+      <div class="row"><button class="btn teal lg" data-act="acceptJob" data-id="${j.id}">Accept job</button><button class="btn danger" data-act="declineJob" data-id="${j.id}">Decline</button></div>`;
+  } else if(['assigned','scheduled','quoted','approved'].includes(s) && other && other.id!==j.id){
     h+=`<h3>You're still on the way to ${esc(other.no)}</h3><p class="small">Tap "I've arrived" on that job before starting this trip.</p>`;
   } else if(['assigned','scheduled','quoted','approved'].includes(s)){
     h+=`<h3>Leaving for this job?</h3><p class="small">Starting the trip shares your phone's location with the customer and the office until you arrive. Keep this page open while you travel.</p>
@@ -911,10 +963,38 @@ const ACT = {
     run(async()=>{ await F.updateDoc(jobRef(j.id),{quote:{...j.quote,status:'declined',reason:note,respondedAt:nowISO()}}); await event(j,`Quotation ${j.quote.no} declined${note?': '+note:''}`,['office'],'Quotation declined'); }, 'Quotation declined. The office has been told.'); },
 
   assign(el){ const j=job(el.dataset.id), tid=val('as-'+j.id), t=tech(tid); if(!t) return;
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{techId:tid, assignedAt:nowISO()}); const nj={...j, techId:tid};
-      await log(j.id,`${t.name} assigned to this job`);
-      await notify(nj,['tech'],'New job assigned',`${j.no} · ${jobTitle(j)} · ${j.customerName||''}, ${j.island||''}${j.slot?' · '+slotText(j.slot):''}`);
-      await notify(nj,['customer'],'Technician assigned',`${j.no} · ${t.name} will do your service${j.slot?' on '+slotText(j.slot):''}.`); }, `Assigned to ${t.name}`); },
+    if(tid===j.techId && accepted(j)) return toast(`${t.name} already has this job.`);
+    run(async()=>{ const at=nowISO();
+      await F.updateDoc(jobRef(j.id),{techId:tid, assignStatus:'pending', assignedAt:at, open:false, acceptedAt:F.deleteField(), declined:F.deleteField()});
+      await log(j.id,`Sent to ${t.name}. Waiting for them to accept`);
+      await notify({...j, techId:tid},['tech'],'New job for you: please accept',`${j.no} · ${jobTitle(j)} · ${j.island||''}${j.slot?' · '+slotText(j.slot):''}`); }, `Sent to ${t.name}. You'll be told when they accept.`); },
+  offerAll(el){ const j=job(el.dataset.id);
+    const active=S.techs.filter(t=>(S.users.find(u=>u.id===t.id)?.status||'active')==='active');
+    if(!active.length) return toast('There are no active technicians to offer this job to.');
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{open:true, offerAt:nowISO(), techId:F.deleteField(), assignStatus:F.deleteField(), acceptedAt:F.deleteField(), declined:F.deleteField()});
+      await log(j.id,'Offered to all technicians');
+      await notifyTo({...j, open:true}, active.map(t=>t.id), 'Open job: first to take it gets it', `${j.no} · ${jobTitle(j)} · ${j.island||''}${j.slot?' · '+slotText(j.slot):' · '+fd(j.preferredDate)}`); },
+      `Offered to ${active.length} technician${active.length>1?'s':''}`); },
+  stopOffer(el){ const j=job(el.dataset.id); run(async()=>{ await F.updateDoc(jobRef(j.id),{open:false}); await log(j.id,'No longer offered to all technicians'); }, 'Job is no longer offered'); },
+  acceptJob(el){ const j=job(el.dataset.id); el.disabled=true;
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{assignStatus:'accepted', acceptedAt:nowISO()});
+      await log(j.id,`${myName()} accepted the job`);
+      await notify(j,['office'],'Job accepted',`${j.no} · ${myName()} accepted the job`);
+      await notify(j,['customer'],'Your technician is confirmed',`${j.no} · ${myName()} will do your service${j.slot?' on '+slotText(j.slot):''}.`); }, 'Job accepted. The office and the customer have been told.').finally(()=>el.disabled=false); },
+  declineJob(el){ const j=job(el.dataset.id), reason=val('dr-'+j.id);
+    // Tell the office first: after declining, the job is no longer visible to this technician.
+    run(async()=>{ await event(j,`${myName()} declined the job${reason?': '+reason:''}`,['office'],'Job declined');
+      await F.updateDoc(jobRef(j.id),{assignStatus:'declined', techId:F.deleteField(), declined:{uid:ME.user.uid, name:myName(), reason, at:nowISO()}});
+      UI.sel=''; }, 'Job declined. The office has been told.'); },
+  takeJob(el){ const id=el.dataset.id, uid=ME.user.uid; el.disabled=true;
+    run(async()=>{ const at=nowISO();
+      await F.runTransaction(db, async tx=>{ const s=await tx.get(jobRef(id)), x=s.exists()?s.data():null;
+        if(!x || !x.open || x.techId) throw {message:'Another technician already took this job.'};
+        tx.update(jobRef(id),{techId:uid, open:false, assignStatus:'accepted', acceptedAt:at, assignedAt:at}); });
+      const j={...job(id), techId:uid, open:false};
+      await log(id,`${myName()} took the job`);
+      await notify(j,['office'],'Job taken',`${j.no} · ${myName()} took the job`);
+      await notify(j,['customer'],'Your technician is confirmed',`${j.no} · ${myName()} will do your service${j.slot?' on '+slotText(j.slot):''}.`); }, 'The job is yours. The office and the customer have been told.').finally(()=>el.disabled=false); },
 
   async startTrip(el){ const j=job(el.dataset.id), eta=Math.max(1,Math.min(240,+val('eta-'+j.id)||25));
     el.disabled=true; toast('Getting your location…');
@@ -1032,4 +1112,4 @@ function start(def){
   render();
 }
 
-export { A, ACCTS, ACT, AC_TYPES, BTUS, CHANGE, CLEARED, CONFIG_ERROR, CUR, F, FORMS, GPS, HERO, MAPS, ME, METHODS, OWNER_EXISTS, P, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, addDays, ago, alertItem, appMod, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, busyTech, c, clone, co, completeProfileView, copyBtn, createLogin, createMap, createProfile, cust, d, db, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, icon, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, lineEditor, loadUI, log, markSVG, messagesSec, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, nowISO, openJobById, overdue, pad, payEntry, payPanel, pickDefault, pill, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readReceipt, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, settle, setupView, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncMsgSub, sys, t12, tech, techNext, techSec, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateMap, updateTotals, val, view, workSec };
+export { A, ACCTS, ACT, AC_TYPES, BTUS, CHANGE, CLEARED, CONFIG_ERROR, CUR, F, FORMS, GPS, HERO, MAPS, ME, METHODS, OWNER_EXISTS, P, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, busyTech, c, clone, co, completeProfileView, copyBtn, createLogin, createMap, createProfile, cust, d, db, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, icon, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, lineEditor, loadUI, log, markSVG, messagesSec, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readReceipt, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, settle, setupView, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncMsgSub, sys, t12, tech, techNext, techSec, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateMap, updateTotals, val, view, workSec };
