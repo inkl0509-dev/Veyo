@@ -1,7 +1,12 @@
 /* AC Service Portal — shared core used by the three portals:
    customer (index.html), technician (tech.html) and admin / service provider (admin.html).
    Each portal page loads its own entry file, which registers its screens with start(). */
-import { firebaseConfig, SETTINGS } from './firebase-config.js';
+// The config is loaded with a dynamic import so that a typo in it shows a readable message
+// on the page instead of a blank screen.
+let firebaseConfig = null, SETTINGS = {}, CONFIG_ERROR = '';
+try { ({ firebaseConfig, SETTINGS = {} } = await import('./firebase-config.js')); }
+catch (e) { CONFIG_ERROR = String(e && e.message || e); console.error('firebase-config.js', e); }
+SETTINGS = { currency:'MVR', timeZone:'Indian/Maldives', mapCenter:[4.1755,73.5093], avgSpeedKmh:22, gpsIntervalSec:12, vapidKey:'', ...SETTINGS };
 
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
 const CONFIGURED = !!firebaseConfig?.apiKey && !String(firebaseConfig.apiKey).startsWith('YOUR_');
@@ -12,12 +17,12 @@ const PORTAL_URL = {customer:'index.html', technician:'tech.html', admin:'admin.
 const PORTAL_NAME = {customer:'Customer portal', technician:'Technician portal', admin:'Admin portal'};
 const portalLink = p => new URL(PORTAL_URL[p], location.href).href.replace(/index\.html$/, '');
 
-let A, F, appMod, auth, db;
+let A, F, appMod, auth, db, fbApp;
 if (CONFIGURED) {
   const [app, authMod, fsMod] = await Promise.all([import(FB + 'firebase-app.js'), import(FB + 'firebase-auth.js'), import(FB + 'firebase-firestore.js')]);
   appMod = app; A = authMod; F = fsMod;
   // A separately named Firebase app per portal keeps each portal's sign-in separate in the same browser.
-  const fbApp = app.initializeApp(firebaseConfig, 'portal-' + PORTAL);
+  fbApp = app.initializeApp(firebaseConfig, 'portal-' + PORTAL);
   auth = A.getAuth(fbApp);
   db = F.initializeFirestore(fbApp, {ignoreUndefinedProperties:true});
 }
@@ -53,13 +58,13 @@ const SVC_ICONS = [
   '<path d="M4 20h16M6 20V9l6-5 6 5v11"/><path d="M10 20v-6h4v6"/>'
 ];
 /* ---------- state ---------- */
-const S = {company:null, portal:null, services:[], techs:[], customers:[], users:[], jobs:[], ledger:[], msgs:{}, loaded:{}, need:[], pub:{}};
+const S = {company:null, portal:null, services:[], techs:[], customers:[], users:[], jobs:[], ledger:[], inbox:[], msgs:{}, loaded:{}, need:[], pub:{}};
 const ME = {user:null, profile:null, profileLoaded:false, role:null};
 let OWNER_EXISTS = null;
 let UI = loadUI();
 function loadUI(){ let u={}; try{ u=JSON.parse(localStorage.getItem('acsp-ui-'+PORTAL)||'{}'); }catch(e){}
-  return Object.assign({ptab:'jobs',ctab:'requests',filter:'action',period:'month'}, u,
-    {q:'',sel:'',ed:{},confirm:'',busy:'',pick:{},authMode:'signin',creating:false,payM:{}}); }
+  return Object.assign({ptab:'jobs',ctab:'home',filter:'action',period:'month'}, u,
+    {q:'',sel:'',ed:{},confirm:'',busy:'',pick:{},authMode:'signin',creating:false,payM:{},rcpt:{},bell:false,modal:null,bk:null}); }
 function saveUI(){ try{ const {ptab,ctab,filter,period}=UI; localStorage.setItem('acsp-ui-'+PORTAL,JSON.stringify({ptab,ctab,filter,period})); }catch(e){} }
 // Settings the admin controls for the customer and technician portals.
 const PCFG = () => {
@@ -163,13 +168,139 @@ function sys(text){ return {kind:'sys', text, at:nowISO(), uid:ME.user.uid, role
 function msgObj(text){ return {kind:'msg', text, at:nowISO(), uid:ME.user.uid, role:ME.role, name:myName()}; }
 function myName(){ return ME.role==='provider' ? co().name : (ME.profile?.name || ME.user?.displayName || 'User'); }
 function log(jobId, text){ return F.addDoc(c('jobs',jobId,'messages'), sys(text)).catch(e=>console.warn('activity log', e)); }
+
+/* ---------- notifications ----------
+   Every step writes a notification to each other party's inbox: inbox/office/items for the office,
+   inbox/{uid}/items for a customer or technician. Each portal shows them under the bell, as phone/desktop
+   alerts while a portal is open, and (with the optional Cloud Function) as push messages when it's closed. */
+const STALE_H = 4;   // location sharing stops on its own if a trip runs longer than this
+const staleTrip = j => !!(j.departedAt && !j.arrivedAt && Date.now()-new Date(j.departedAt).getTime() > STALE_H*3600e3);
+const inboxId = () => ME.role==='provider' ? 'office' : ME.user.uid;
+const portalOfRecipient = (j, rid) => rid==='office' ? 'admin' : rid===j.techId ? 'technician' : 'customer';
+function recipients(j, parties){
+  const out=new Set();
+  for(const p of parties){
+    if(p==='office') out.add('office');
+    else if(p==='customer' && j.customerId && cust(j.customerId)?.hasLogin!==false) out.add(j.customerId);
+    else if(p==='tech' && j.techId) out.add(j.techId);
+  }
+  if(ME.role==='provider') out.delete('office');
+  out.delete(ME.user?.uid);
+  return [...out];
+}
+async function notify(j, parties, title, body){
+  const to=recipients(j, parties); if(!to.length) return;
+  try{
+    const b=F.writeBatch(db);
+    for(const rid of to) b.set(F.doc(c('inbox',rid,'items')), {title, body, jobId:j.id, jobNo:j.no||'', at:nowISO(), read:false, from:ME.user.uid, fromName:myName(), portal:portalOfRecipient(j,rid)});
+    await b.commit();
+  }catch(e){ console.warn('notify', e); }
+}
+/** Record a step in the job's activity log and notify the other parties. */
+async function event(j, text, parties, title){ await log(j.id, text); await notify(j, parties, title, `${j.no?j.no+' · ':''}${text}`); }
+const unread = () => (S.inbox||[]).filter(x=>!x.read).length;
+function itemUrl(it){ return new URL(PORTAL_URL[it.portal||PORTAL] + (it.jobId ? '?job='+encodeURIComponent(it.jobId) : ''), location.href).href; }
+function pushState(){ if(!('Notification' in window)) return /iPhone|iPad|iPod/.test(navigator.userAgent) ? 'ios' : 'none'; return Notification.permission; }
+async function alertItem(it){
+  if(!document.hidden){ toast(`${it.title}: ${it.body}`); return; }
+  if(pushState()!=='granted') return;
+  const opts={body:it.body, tag:it.id, icon:'assets/icon-192.png', badge:'assets/icon-192.png', data:{url:itemUrl(it)}};
+  try{ const reg=SW_REG || await navigator.serviceWorker?.getRegistration(); if(reg){ await reg.showNotification(it.title, opts); return; } }catch(e){}
+  try{ const n=new Notification(it.title, opts); n.onclick=()=>{ window.focus(); openJobById(it.jobId); render(); }; }catch(e){}
+}
+let SW_REG=null, PUSH_TOKEN=null, pushTried=null;
+async function registerSW(){
+  if(!('serviceWorker' in navigator) || !CONFIGURED) return null;
+  const q = SETTINGS.vapidKey ? '?'+new URLSearchParams({apiKey:firebaseConfig.apiKey, projectId:firebaseConfig.projectId, messagingSenderId:firebaseConfig.messagingSenderId||'', appId:firebaseConfig.appId||''}) : '';
+  try{ SW_REG = await navigator.serviceWorker.register('sw.js'+q); }catch(e){ console.warn('service worker', e); }
+  return SW_REG;
+}
+// Push while every portal is closed needs a VAPID key in firebase-config.js and the Cloud Function in /functions.
+async function registerPush(){
+  if(!SETTINGS.vapidKey || !ME.user || pushState()!=='granted' || pushTried===ME.user.uid) return;
+  pushTried=ME.user.uid;
+  try{
+    const M=await import(FB+'firebase-messaging.js');
+    if(!(await M.isSupported())) return;
+    const reg=SW_REG || await registerSW(); if(!reg) return;
+    const token=await M.getToken(M.getMessaging(fbApp), {vapidKey:SETTINGS.vapidKey, serviceWorkerRegistration:reg});
+    PUSH_TOKEN=token;
+    if(token && !(ME.profile?.fcmTokens||[]).includes(token)) await F.updateDoc(d('users',ME.user.uid), {fcmTokens:F.arrayUnion(token)});
+  }catch(e){ console.warn('push', e); }
+}
+function openJobById(id){
+  if(!id) return;
+  UI.sel=id; UI.bell=false; UI.modal=null;
+  if(PORTAL==='admin'){ UI.ptab='jobs'; UI.filter='all'; UI.newJob=null; }
+  if(innerWidth<=900) scrollTo(0,0);
+}
+function bellButton(){
+  const n=unread();
+  return `<button class="bell" data-act="bell" aria-label="Notifications${n?', '+n+' unread':''}" aria-expanded="${!!UI.bell}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>${n?`<span class="bell-n">${n>9?'9+':n}</span>`:''}</button>`;
+}
+function pushPrompt(){
+  const s=pushState();
+  if(s==='granted') return `<p class="bp-note ok">Alerts are on for this device.</p>`;
+  if(s==='denied') return `<p class="bp-note">Alerts are blocked for this site. Allow notifications in your browser's site settings to get them.</p>`;
+  if(s==='ios') return `<p class="bp-note">On iPhone, tap Share, then Add to Home Screen. Open the portal from your Home Screen and turn on alerts there.</p>`;
+  if(s==='none') return '';
+  return `<div class="bp-note"><span>Get an alert on this device for every update, even when the portal is in the background.</span><button class="btn sm primary" data-act="enablePush">Turn on alerts</button></div>`;
+}
+function bellPanel(){
+  if(!UI.bell) return '';
+  const items=S.inbox||[];
+  return `<div class="backdrop clear" data-act="bellClose"></div><section class="bell-panel" role="dialog" aria-label="Notifications">
+    <div class="bp-head"><h3>Notifications</h3>${unread()?'<button class="linkbtn" data-act="readAll">Mark all as read</button>':''}</div>
+    ${pushPrompt()}
+    ${items.length?`<ul class="bp-list">${items.map(it=>`<li><button data-act="openItem" data-id="${it.id}" class="${it.read?'':'unread'}"><b>${esc(it.title)}</b><span>${esc(it.body)}</span><small>${ago(it.at)}${it.fromName?' · '+esc(it.fromName):''}</small></button></li>`).join('')}</ul>`
+      :`<div class="empty small"><p>No notifications yet. Every update about your ${PORTAL==='technician'?'jobs':'requests'} will appear here.</p></div>`}
+  </section>`;
+}
+function modalView(){
+  if(!UI.modal) return '';
+  return `<div class="backdrop" data-act="modalClose"></div><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(UI.modal.title)}"><div class="modal-h"><h3>${esc(UI.modal.title)}</h3><button class="icon" data-act="modalClose" aria-label="Close">×</button></div><div class="modal-b">${UI.modal.html}</div></div>`;
+}
+
+/* ---------- payment receipts ----------
+   Stored in Firestore (jobs/{id}/files/receipt) so no Cloud Storage bucket or paid plan is needed.
+   Photos are resized to stay well under Firestore's 1 MB document limit. */
+function fileToDataUrl(f){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(new Error('Could not read that file.')); r.readAsDataURL(f); }); }
+async function readReceipt(file){
+  const isPdf = file.type==='application/pdf' || /\.pdf$/i.test(file.name);
+  if(isPdf){
+    if(file.size>700*1024) throw new Error('That PDF is over 700 KB. Upload a screenshot or photo of the receipt instead.');
+    return {dataUrl:await fileToDataUrl(file), name:file.name, type:'application/pdf', size:file.size};
+  }
+  if(!/^image\//.test(file.type)) throw new Error('Upload a photo, screenshot or PDF of the receipt.');
+  const bmp = await createImageBitmap(file).catch(()=>null);
+  if(!bmp) throw new Error("This photo format can't be read here. Take a screenshot of the receipt and upload that.");
+  let max=1600, q=0.82, out='';
+  for(let i=0;i<6;i++){
+    const k=Math.min(1, max/Math.max(bmp.width,bmp.height)), cv=document.createElement('canvas');
+    cv.width=Math.max(1,Math.round(bmp.width*k)); cv.height=Math.max(1,Math.round(bmp.height*k));
+    const g=cv.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,cv.width,cv.height); g.drawImage(bmp,0,0,cv.width,cv.height);
+    out=cv.toDataURL('image/jpeg', q); if(out.length<900000) break; max*=0.8; q=Math.max(0.5,q-0.08);
+  }
+  if(out.length>=900000) throw new Error('That image is too large. Take a screenshot of the receipt and upload that.');
+  return {dataUrl:out, name:file.name.replace(/\.[^.]+$/,'')+'.jpg', type:'image/jpeg', size:Math.round(out.length*0.75)};
+}
+const copyBtn = v => `<button type="button" class="btn sm" data-act="copy" data-v="${esc(v)}">Copy</button>`;
+function receiptPicker(j){
+  const r=UI.rcpt[j.id];
+  if(r) return `<div class="rcpt">${r.type==='application/pdf'?'<span class="rcpt-ic">PDF</span>':`<img src="${esc(r.dataUrl)}" alt="">`}<div style="min-width:0"><b>${esc(r.name)}</b><small>${Math.max(1,Math.round(r.size/1024))} KB · ready to send</small></div><button type="button" class="icon" data-act="rcptRemove" data-id="${j.id}" aria-label="Remove receipt">×</button></div>`;
+  return `<label class="upload"><input type="file" id="rfile-${j.id}" data-np accept="image/*,application/pdf" data-change="receiptFile" data-id="${j.id}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></svg><span><b>Upload payment receipt</b><small>Photo, screenshot or PDF</small></span></label>`;
+}
+function receiptLine(j){
+  const R=j.receipt; if(!R || !['provider','customer'].includes(ME.role)) return '';
+  return `<div class="row small rcpt-line"><span class="pill teal">Receipt uploaded</span><span class="muted">${fdt(R.at)}</span><button class="btn sm" data-act="viewReceipt" data-id="${j.id}">View receipt</button></div>`;
+}
 async function nextNumber(name){
   return F.runTransaction(db, async tx=>{ const ref=d('counters',name); const s=await tx.get(ref); const n=(s.exists()? s.data().n : 0)+1; tx.set(ref,{n}); return n; });
 }
 /* ---------- subscriptions ---------- */
 let unsubs=[], subRole=null, msgSub={id:null, un:null};
 function stopSubs(){ unsubs.forEach(u=>{ try{u();}catch(e){} }); unsubs=[]; subRole=null; if(msgSub.un) msgSub.un(); msgSub={id:null,un:null};
-  Object.assign(S,{services:[],techs:[],customers:[],users:[],jobs:[],ledger:[],msgs:{},loaded:{},need:[]}); }
+  Object.assign(S,{services:[],techs:[],customers:[],users:[],jobs:[],ledger:[],inbox:[],msgs:{},loaded:{},need:[]}); }
 function subCol(key, q, map=snapList){ S.need.push(key); unsubs.push(F.onSnapshot(q, s=>{ S[key]=map(s); S.loaded[key]=true; schedRender(); }, e=>{ console.error(key,e); S.loaded[key]=true; toast(errMsg(e)); schedRender(); })); }
 function startSubs(){
   const role=ME.role, uid=ME.user.uid;
@@ -183,6 +314,19 @@ function startSubs(){
   } else if(role==='technician'){
     subCol('jobs', F.query(c('jobs'), F.where('techId','==',uid)));
   }
+  startInbox();
+  registerPush();
+}
+function startInbox(){
+  let first=true;
+  S.need.push('inbox');
+  unsubs.push(F.onSnapshot(F.query(c('inbox',inboxId(),'items'), F.orderBy('at','desc'), F.limit(50)), s=>{
+    const items=snapList(s), prev=new Set((S.inbox||[]).map(x=>x.id));
+    if(!first) items.filter(it=>!it.read && !prev.has(it.id)).forEach(alertItem);
+    first=false; S.inbox=items; S.loaded.inbox=true;
+    try{ const n=items.filter(x=>!x.read).length; document.title=(n?`(${n}) `:'')+document.title.replace(/^\(\d+\) /,''); n? navigator.setAppBadge?.(n).catch(()=>{}) : navigator.clearAppBadge?.().catch(()=>{}); }catch(e){}
+    schedRender();
+  }, e=>{ console.warn('inbox',e); S.loaded.inbox=true; schedRender(); }));
 }
 function syncMsgSub(){
   const id = UI.sel && job(UI.sel) ? UI.sel : null;
@@ -275,8 +419,9 @@ function view(){
   }
   if((ME.profile.status||'active')!=='active') return gateView('Your account is paused', `Please contact ${esc(co().name)}${co().phone?' on '+esc(co().phone):''}.`);
   if(!ready()) return header()+`<div class="loading">Loading…</div>`;
+  if(UI.pendingJob && job(UI.pendingJob)){ openJobById(UI.pendingJob); UI.pendingJob=null; }
   const note = PORTAL==='customer'? PCFG().customerNotice : PORTAL==='technician'? PCFG().techNotice : '';
-  return header() + `<main class="wrap">${note?`<div class="notice"><b>${esc(co().name)}:</b> ${esc(note)}</div>`:''}${P.view()}</main>`;
+  return header() + `<main class="wrap">${note?`<div class="notice"><b>${esc(co().name)}:</b> ${esc(note)}</div>`:''}${P.view()}</main>` + bellPanel() + modalView();
 }
 function markSVG(){ return `<svg class="mark" viewBox="0 0 38 38" aria-hidden="true"><rect class="u" x="3" y="6" width="32" height="16" rx="5"/><line class="l" x1="9" y1="17" x2="29" y2="17"/><path class="w" d="M10 27c2 2 2 4 0 6M19 27c2 2 2 4 0 6M28 27c2 2 2 4 0 6"/></svg>`; }
 function brandName(){ return S.company?.name || 'AC Service Portal'; }
@@ -284,8 +429,8 @@ function header(){
   return `<header class="top"><div class="top-in">
     <div class="brand">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
     ${PORTAL==='admin'?`<nav class="portal-links"><a href="${PORTAL_URL.customer}" target="_blank" rel="noopener">Customer portal ↗</a><a href="${PORTAL_URL.technician}" target="_blank" rel="noopener">Technician portal ↗</a></nav>`:''}
-    <div class="me"><span class="avatar">${esc(initials(ME.profile?.name))}</span><div><div style="font-weight:700;line-height:1.2">${esc(ME.profile?.name||'')}</div><span class="role-badge ${ME.role}">${ME.role==='provider'?'Office':ME.role==='technician'?'Technician':'Customer'}</span></div>
-    <button class="btn sm" data-act="signOut">Sign out</button></div>
+    <div class="me">${bellButton()}<span class="avatar">${esc(initials(ME.profile?.name))}</span><div class="me-txt"><div style="font-weight:700;line-height:1.2">${esc(ME.profile?.name||'')}</div><span class="role-badge ${ME.role}">${ME.role==='provider'?'Office':ME.role==='technician'?'Technician':'Customer'}</span></div>
+    <button class="btn sm signout" data-act="signOut">Sign out</button></div>
   </div></header>`;
 }
 function gateView(title, text, linkTo){
@@ -294,6 +439,25 @@ function gateView(title, text, linkTo){
     <button class="btn block" data-act="signOut">Sign out</button></div></section></div>`;
 }
 function setupView(){
+  if(CONFIG_ERROR) return `<div class="setup stack"><h1>There's a mistake in firebase-config.js</h1>
+    <p>The browser couldn't read <span class="mono">js/firebase-config.js</span>:</p><pre>${esc(CONFIG_ERROR)}</pre>
+    <p>The most common cause is a missing <span class="mono">};</span> at the end of the <span class="mono">firebaseConfig</span> block, or pasting Firebase's whole snippet (with <span class="mono">import</span> and <span class="mono">initializeApp</span> lines) instead of only the values. The file should look like this:</p>
+    <pre>export const firebaseConfig = {
+  apiKey: "AIza…",
+  authDomain: "your-project.firebaseapp.com",
+  projectId: "your-project",
+  storageBucket: "your-project.appspot.com",
+  messagingSenderId: "1234567890",
+  appId: "1:1234567890:web:abc123"
+};
+
+export const SETTINGS = {
+  currency: "MVR",
+  timeZone: "Indian/Maldives",
+  mapCenter: [4.1755, 73.5093],
+  avgSpeedKmh: 22,
+  gpsIntervalSec: 12
+};</pre></div>`;
   return `<div class="setup stack"><h1>Connect Firebase</h1>
     <p>This portal needs a Firebase project before it can run. Open <span class="mono">js/firebase-config.js</span> and paste the web app config from Firebase console → Project settings → Your apps.</p>
     <pre>export const firebaseConfig = {
@@ -474,7 +638,12 @@ function techNext(j){
     h+=`<h3>Leaving for this job?</h3><p class="small">Starting the trip shares your phone's location with the customer and the office until you arrive. Keep this page open while you travel.</p>
       <div class="row"><label class="field" style="max-width:170px"><span>Travel time (minutes)</span><input id="eta-${j.id}" type="number" min="1" max="240" value="25"></label>
       <button class="btn teal" data-act="startTrip" data-id="${j.id}" style="align-self:flex-end">Start trip</button></div>`;
+  } else if(s==='enroute' && staleTrip(j)){
+    h+=`<h3>Location sharing stopped</h3><p class="small">This trip started more than ${STALE_H} hours ago, so your location is no longer shared. Tap "I've arrived" if you're there.</p>
+      <div class="row"><button class="btn teal" data-act="arrived" data-id="${j.id}">I've arrived</button></div>`;
   } else if(s==='enroute'){
+    const near = j.dest && GPS.last && haversineKm(GPS.last, j.dest) < 0.15;
+    if(near) h+=`<div class="callout teal"><b>You're at the customer's location.</b> Tap "I've arrived" to stop sharing your location.</div>`;
     h+=`<h3>You're on the way</h3><p class="small">${GPS.error?`<b style="color:var(--coral-text)">${esc(GPS.error)}</b>`:GPS.watchId!=null?'Sharing your location. Keep this page open.':'Starting location sharing…'}</p>
       <div class="row"><button class="btn teal" data-act="arrived" data-id="${j.id}">I've arrived</button>${j.dest?`<a class="btn" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${j.dest.lat},${j.dest.lng}">Directions</a>`:''}</div>`;
   } else if(s==='onsite'){
@@ -490,6 +659,13 @@ function techNext(j){
 /* ---------- live tracking ---------- */
 function trackingSec(j){
   const t=tech(j.techId), live=j.departedAt && !j.arrivedAt;
+  if(j.arrivedAt){
+    const mins=j.trip?.mins ?? Math.max(1,Math.round((new Date(j.arrivedAt)-new Date(j.departedAt))/60000));
+    return `<div class="sec"><div class="sec-h"><h3>Trip</h3><span class="pill mute">Location sharing ended</span></div>
+      <p class="small">${esc(t?.name||'The technician')} left at ${ft(j.departedAt)} and arrived at ${ft(j.arrivedAt)}: ${mins} min${j.trip?.km?`, about ${j.trip.km} km`:''}. Location sharing stopped on arrival and the route was deleted.</p></div>`;
+  }
+  if(staleTrip(j)) return `<div class="sec"><div class="sec-h"><h3>Trip</h3><span class="pill mute">Location sharing stopped</span></div>
+      <p class="small">Location sharing stopped automatically because this trip started more than ${STALE_H} hours ago. The route was deleted.</p></div>`;
   return `<div class="sec"><div class="sec-h"><h3>${live?'Live location':'Trip'}</h3>${live?'<span class="pill live">Live</span>':`<span class="small muted">Arrived ${fdt(j.arrivedAt)}</span>`}</div>
     <div class="eta" data-eta="${j.id}">${etaHTML(j)}</div>
     <div class="map" data-map="track-${j.id}" role="img" aria-label="Map of ${esc(t?.name||'the technician')}'s trip"></div>
@@ -560,8 +736,12 @@ function updateMap(key, m){
 
 /* ---------- technician GPS ---------- */
 const GPS={watchId:null, jobId:null, last:null, lastWrite:0, error:'', wake:null};
-function myActiveTrip(){ return ME.role==='technician' ? S.jobs.find(j=>j.techId===ME.user.uid && j.departedAt && !j.arrivedAt && !j.cancelled) : null; }
+function myActiveTrip(){ return ME.role==='technician' ? S.jobs.find(j=>j.techId===ME.user.uid && j.departedAt && !j.arrivedAt && !j.finishedAt && !j.cancelled && !staleTrip(j)) : null; }
+const CLEARED=new Set();
 function ensureGPS(){
+  // Delete any location left on a job whose trip has ended (arrived, finished, cancelled or over STALE_H hours).
+  if(ME.role==='technician' || ME.role==='provider') S.jobs.filter(x=>(x.loc||x.trail) && (x.arrivedAt||x.finishedAt||x.cancelled||staleTrip(x)) && !CLEARED.has(x.id) && (ME.role==='provider'||x.techId===ME.user.uid))
+    .forEach(x=>{ CLEARED.add(x.id); F.updateDoc(d('jobs',x.id),{loc:F.deleteField(), trail:F.deleteField()}).catch(e=>console.warn('clear location',e)); });
   const j=myActiveTrip();
   if(!j){ if(GPS.watchId!=null) stopGPS(); return; }
   if(GPS.watchId!=null && GPS.jobId===j.id) return;
@@ -572,7 +752,7 @@ function ensureGPS(){
 }
 function stopGPS(){ if(GPS.watchId!=null && navigator.geolocation) navigator.geolocation.clearWatch(GPS.watchId); GPS.watchId=null; GPS.jobId=null; try{ GPS.wake?.release(); }catch(e){} GPS.wake=null; }
 function sendPos(p){
-  const j=job(GPS.jobId); if(!j) return;
+  const j=job(GPS.jobId); if(!j || j.arrivedAt || j.finishedAt || j.cancelled || staleTrip(j)) return;
   const pos={lat:+p.coords.latitude.toFixed(6), lng:+p.coords.longitude.toFixed(6), acc:Math.round(p.coords.accuracy||0), at:nowISO()};
   const now=Date.now(), gap=now-GPS.lastWrite, moved=GPS.last? haversineKm(GPS.last,pos)*1000 : Infinity;
   if(gap < (SETTINGS.gpsIntervalSec||12)*1000) return;
@@ -612,12 +792,14 @@ function invoiceSec(j){
   h+=docView('Invoice',I,j);
   if(P?.status==='paid'){
     h+=`<div class="callout teal"><b>Paid ${money(P.amount)} by ${METHODS[P.method]?.n||P.method}</b><p class="small">${fdt(P.paidAt)}${P.ref?' · Reference '+esc(P.ref):''}</p>`;
-    if(role==='provider' && P.verified===false) h+=`<p class="small"><b>Check this reference in your ${P.method==='bml'?'BML':'MIB'} account.</b> It's already posted to the books; reverse it if the money didn't arrive.</p>
+    h+=receiptLine(j);
+    if(role==='provider' && P.verified===false) h+=`<p class="small"><b>Check this ${P.ref?'reference':'receipt'} against your ${P.method==='bml'?'BML':'MIB'} account.</b> It's already posted to the books; reverse it if the money didn't arrive.</p>
       <div class="row"><button class="btn teal sm" data-act="verifyPay" data-id="${j.id}">Transfer received</button><button class="btn danger sm ${UI.confirm==='rev'+j.id?'armed':''}" data-act="reversePay" data-id="${j.id}">${UI.confirm==='rev'+j.id?'Tap again to reverse':'Not received, reverse it'}</button></div>`;
     h+=`</div>`;
   } else if(P?.status==='pending'){
-    h+=`<div class="callout coral"><b>${METHODS[P.method]?.n} payment of ${money(I.total)} to collect</b><p class="small">The customer chose this ${fdt(P.requestedAt)}.</p>${role==='provider'?`<div class="row"><button class="btn coral" data-act="confirmPay" data-id="${j.id}">Confirm ${METHODS[P.method]?.n.toLowerCase()} received</button></div>`:''}</div>`;
+    h+=`<div class="callout coral"><b>${METHODS[P.method]?.n} payment of ${money(I.total)} to collect</b><p class="small">The customer chose this ${fdt(P.requestedAt)}.</p>${receiptLine(j)}${role==='provider'?`<div class="row"><button class="btn coral" data-act="confirmPay" data-id="${j.id}">Confirm ${METHODS[P.method]?.n.toLowerCase()} received</button></div>`:''}</div>`;
   } else if(role==='customer') h+=payPanel(j);
+  if(role==='customer' && P && !j.receipt) h+=`<div class="callout"><b>Add your payment receipt</b><p class="small">Optional. It helps the office confirm your payment faster.</p>${receiptPicker(j)}${UI.rcpt[j.id]?`<div><button class="btn teal" data-act="uploadReceipt" data-id="${j.id}">Send receipt</button></div>`:''}</div>`;
   else if(role==='provider') h+=`<details class="callout"><summary><b>Record a payment received another way</b></summary>
       <div class="grid3" style="margin-top:10px"><label class="field"><span>Method</span><select id="rp-m-${j.id}">${Object.entries(METHODS).map(([k,m])=>`<option value="${k}">${m.n}</option>`).join('')}</select></label>
       <label class="field"><span>Reference</span><input id="rp-r-${j.id}" placeholder="Transfer or receipt no."></label></div>
@@ -628,11 +810,25 @@ function payPanel(j){
   const I=j.invoice, C=co(), ms=(I.methods||[]).filter(m=>METHODS[m]);
   if(!ms.length) return `<p class="muted">Contact the office to arrange payment.</p>`;
   const sel=UI.payM[j.id] || ms[0], acct = sel==='bml'? C.bml : C.mib;
-  return `<div class="callout"><b>Pay ${money(I.total)}</b>
-    <div class="opts">${ms.map((m,i)=>`<label class="opt"><input type="radio" name="pm-${j.id}" id="pm-${j.id}-${m}" data-np value="${m}" data-change="payMethod" data-id="${j.id}" ${m===sel?'checked':''}><span class="sicon c${i%5}"><svg viewBox="0 0 24 24">${m==='cash'?'<rect x="3" y="7" width="18" height="10" rx="2"/><circle cx="12" cy="12" r="2.5"/>':m==='card'?'<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M3 10h18"/>':'<path d="M4 10h16L12 4zM6 10v8M10 10v8M14 10v8M18 10v8M4 20h16"/>'}</svg></span><span><b>${METHODS[m].n}</b><span class="small muted">${m==='cash'?'Pay the technician or the office':m==='card'?"On the technician's card machine":(m==='bml'?C.bml:C.mib)?'Account '+esc(m==='bml'?C.bml:C.mib):'Bank transfer'}</span></span></label>`).join('')}</div>
-    ${METHODS[sel].transfer?`<p class="small">Transfer <b>${money(I.total)}</b> to <b>${sel==='bml'?'BML':'MIB'} ${esc(acct||'(account not set)')}</b>, ${esc(C.name)}, with reference <b>${esc(j.no)}</b>. Then enter the reference from your bank app.</p>
-      <label class="field"><span>Bank transfer reference</span><input id="pr-${j.id}" placeholder="e.g. BLAZ2610271234"></label>`:''}
-    <div class="row"><button class="btn teal" data-act="pay" data-id="${j.id}" data-m="${sel}">${METHODS[sel].transfer?'I have paid':'I will pay '+(sel==='cash'?'cash':'by card')+' on site'}</button></div></div>`;
+  return `<div class="pay">
+    <div class="pay-amt"><span class="label">Amount to pay</span><b>${money(I.total)}</b><span class="small">Due ${fd(I.dueDate)}${overdue(j)?' · overdue':''}</span></div>
+    <div class="pay-step"><span class="pay-n">1</span><div class="stack" style="flex:1;min-width:0"><b>Choose how to pay</b><div class="opts">${ms.map((m,i)=>`<label class="opt"><input type="radio" name="pm-${j.id}" id="pm-${j.id}-${m}" data-np value="${m}" data-change="payMethod" data-id="${j.id}" ${m===sel?'checked':''}><span class="sicon c${i%5}"><svg viewBox="0 0 24 24">${m==='cash'?'<rect x="3" y="7" width="18" height="10" rx="2"/><circle cx="12" cy="12" r="2.5"/>':m==='card'?'<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M3 10h18"/>':'<path d="M4 10h16L12 4zM6 10v8M10 10v8M14 10v8M18 10v8M4 20h16"/>'}</svg></span><span><b>${METHODS[m].n}</b><span class="small muted">${m==='cash'?'Pay the technician or the office':m==='card'?"On the technician's card machine":(m==='bml'?C.bml:C.mib)?'Account '+esc(m==='bml'?C.bml:C.mib):'Bank transfer'}</span></span></label>`).join('')}</div>
+    </div></div>
+    ${METHODS[sel].transfer?`
+    <div class="pay-step"><span class="pay-n">2</span><div class="stack" style="flex:1;min-width:0"><b>Transfer the money</b>
+      <div class="bankbox">
+        <div><span class="label">Bank</span><b>${sel==='bml'?'Bank of Maldives (BML)':'Maldives Islamic Bank (MIB)'}</b></div>
+        <div><span class="label">Account name</span><b>${esc(C.name)}</b></div>
+        <div><span class="label">Account number</span><span class="row"><b class="mono">${esc(acct||'Ask the office')}</b>${acct?copyBtn(acct):''}</span></div>
+        <div><span class="label">Amount</span><span class="row"><b>${money(I.total)}</b>${copyBtn((+I.total).toFixed(2))}</span></div>
+        <div><span class="label">Reference</span><span class="row"><b class="mono">${esc(j.no)}</b>${copyBtn(j.no)}</span></div>
+      </div></div></div>
+    <div class="pay-step"><span class="pay-n">3</span><div class="stack" style="flex:1;min-width:0"><b>Show us you've paid</b>
+      <label class="field"><span>Transfer reference from your bank app</span><input id="pr-${j.id}" placeholder="e.g. BLAZ2610271234"></label>
+      ${receiptPicker(j)}
+      <p class="small muted">Add the reference, the receipt, or both.</p></div></div>`
+    :`<p class="small">${sel==='cash'?`Pay ${money(I.total)} in cash to the technician or at our office.`:`Pay ${money(I.total)} on the technician's card machine.`} The office confirms it once the money is received.</p>`}
+    <button class="btn teal block lg" data-act="pay" data-id="${j.id}" data-m="${sel}">${METHODS[sel].transfer?'Send payment details':`I'll pay ${sel==='cash'?'cash':'by card'}`}</button></div>`;
 }
 
 /* ---------- rating & messages ---------- */
@@ -658,7 +854,35 @@ const jobRef = id => d('jobs',id);
 const ACT = {
   authMode(el){ UI.authMode=el.dataset.v; render(); },
   async google(){ await run(()=>A.signInWithPopup(auth, new A.GoogleAuthProvider())); },
-  async signOut(){ stopGPS(); await A.signOut(auth); },
+  async signOut(){ stopGPS();
+    if(PUSH_TOKEN && ME.user){ try{ await F.updateDoc(d('users',ME.user.uid),{fcmTokens:F.arrayRemove(PUSH_TOKEN)}); }catch(e){} PUSH_TOKEN=null; }
+    pushTried=null; await A.signOut(auth); },
+  bell(){ UI.bell=!UI.bell; render(); },
+  bellClose(){ UI.bell=false; render(); },
+  modalClose(){ UI.modal=null; render(); },
+  openItem(el){ const it=(S.inbox||[]).find(x=>x.id===el.dataset.id); UI.bell=false;
+    if(it && !it.read) F.updateDoc(d('inbox',inboxId(),'items',it.id),{read:true}).catch(()=>{});
+    if(it?.jobId && job(it.jobId)) openJobById(it.jobId); render(); },
+  readAll(){ const b=F.writeBatch(db); (S.inbox||[]).filter(x=>!x.read).forEach(x=>b.update(d('inbox',inboxId(),'items',x.id),{read:true})); b.commit().catch(e=>toast(errMsg(e))); },
+  async enablePush(){
+    try{ const p=await Notification.requestPermission(); if(p!=='granted'){ toast('Alerts were not allowed on this device.'); return render(); }
+      await registerSW(); pushTried=null; await registerPush(); toast('Alerts are on for this device'); render(); }
+    catch(e){ toast('This browser cannot show alerts.'); } },
+  async copy(el){ const v=el.dataset.v; try{ await navigator.clipboard.writeText(v); toast('Copied: '+v); }catch(e){ toast(v); } },
+  rcptRemove(el){ delete UI.rcpt[el.dataset.id]; render(); },
+  async viewReceipt(el){ const id=el.dataset.id; UI.modal={title:'Payment receipt', html:'<div class="loading">Loading the receipt…</div>'}; render();
+    try{ const s=await F.getDoc(d('jobs',id,'files','receipt')); if(!s.exists()) throw new Error('The receipt was not found.');
+      const r=s.data(); let body;
+      if(r.type==='application/pdf'){ const u=URL.createObjectURL(await (await fetch(r.dataUrl)).blob()); body=`<p><a class="btn primary" href="${u}" target="_blank" rel="noopener">Open the PDF</a></p><embed class="rcpt-pdf" src="${u}" type="application/pdf">`; }
+      else body=`<img class="rcpt-full" src="${esc(r.dataUrl)}" alt="Payment receipt">`;
+      UI.modal={title:'Payment receipt', html:body+`<p class="small muted">${esc(r.name)} · uploaded ${fdt(r.at)}</p>`};
+    }catch(e){ UI.modal={title:'Payment receipt', html:`<p>${esc(errMsg(e))}</p>`}; }
+    render(); },
+  uploadReceipt(el){ const j=job(el.dataset.id), r=UI.rcpt[j.id]; if(!r) return toast('Choose a receipt file first.');
+    el.disabled=true;
+    run(async()=>{ const b=F.writeBatch(db), at=nowISO();
+      b.set(d('jobs',j.id,'files','receipt'),{...r, at, uid:ME.user.uid}); b.update(jobRef(j.id),{receipt:{name:r.name, type:r.type, at}});
+      await b.commit(); delete UI.rcpt[j.id]; await event(j,'Payment receipt uploaded',['office'],'Payment receipt uploaded'); }, 'Receipt sent to the office').finally(()=>el.disabled=false); },
   openJob(el){ UI.sel=el.dataset.id; UI.confirm=''; render(); if(innerWidth<=900) scrollTo(0,0); },
   closeJob(){ UI.sel=''; render(); },
   addLine(el){ UI.ed[el.dataset.key].lines.push({desc:'',qty:1,rate:0}); render(); },
@@ -670,7 +894,8 @@ const ACT = {
 
   schedule(el){ const j=job(el.dataset.id), date=val('sd-'+j.id), time=val('st-'+j.id), note=val('sm-'+j.id);
     if(!date||!time) return toast('Choose a date and time first.');
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{slot:{date,time}}); await log(j.id,`${j.slot?'Appointment moved to':'Appointment confirmed for'} ${slotText({date,time})}`);
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{slot:{date,time}});
+      await event(j,`${j.slot?'Appointment moved to':'Appointment confirmed for'} ${slotText({date,time})}${note?'. '+note:''}`,['customer','tech'], j.slot?'Appointment changed':'Appointment confirmed');
       if(note){ await F.addDoc(c('jobs',j.id,'messages'),msgObj(note)); const t=document.getElementById('sm-'+j.id); if(t) t.value=''; } }, 'Appointment sent to the customer'); },
 
   sendQuote(el){ const j=job(el.dataset.id), key='q-'+j.id, e=UI.ed[key];
@@ -678,26 +903,35 @@ const ACT = {
     if(!lines.length) return toast('Add at least one line to the quotation.');
     run(async()=>{ const no=j.quote?.no || `Q-${today().slice(0,4)}-${pad(await nextNumber('quotes'))}`;
       const quote={no, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, sentAt:nowISO(), validUntil:addDays(today(),14), status:'sent', rev:(j.quote?.rev||0)+1};
-      await F.updateDoc(jobRef(j.id),{quote}); await log(j.id,`Quotation ${no}${quote.rev>1?' (revised)':''} sent: ${money(totals(quote).total)}`); delete UI.ed[key]; UI.confirm=''; }, 'Quotation sent'); },
+      await F.updateDoc(jobRef(j.id),{quote}); await event(j,`Quotation ${no}${quote.rev>1?' (revised)':''} sent: ${money(totals(quote).total)}. Please review and approve.`,['customer'],'Your quotation is ready'); delete UI.ed[key]; UI.confirm=''; }, 'Quotation sent'); },
 
   quoteAccept(el){ const j=job(el.dataset.id), note=val('qr-'+j.id);
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{quote:{...j.quote,status:'accepted',respondedAt:nowISO()}}); await log(j.id,`Quotation ${j.quote.no} accepted`); if(note) await F.addDoc(c('jobs',j.id,'messages'),msgObj(note)); }, 'Quotation accepted'); },
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{quote:{...j.quote,status:'accepted',respondedAt:nowISO()}}); await event(j,`Quotation ${j.quote.no} accepted${note?': '+note:''}`,['office'],'Quotation accepted'); if(note) await F.addDoc(c('jobs',j.id,'messages'),msgObj(note)); }, 'Quotation accepted'); },
   quoteDecline(el){ const j=job(el.dataset.id), note=val('qr-'+j.id);
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{quote:{...j.quote,status:'declined',reason:note,respondedAt:nowISO()}}); await log(j.id,`Quotation ${j.quote.no} declined`); }, 'Quotation declined. The office has been told.'); },
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{quote:{...j.quote,status:'declined',reason:note,respondedAt:nowISO()}}); await event(j,`Quotation ${j.quote.no} declined${note?': '+note:''}`,['office'],'Quotation declined'); }, 'Quotation declined. The office has been told.'); },
 
   assign(el){ const j=job(el.dataset.id), tid=val('as-'+j.id), t=tech(tid); if(!t) return;
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{techId:tid, assignedAt:nowISO()}); await log(j.id,`${t.name} assigned to this job`); }, `Assigned to ${t.name}`); },
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{techId:tid, assignedAt:nowISO()}); const nj={...j, techId:tid};
+      await log(j.id,`${t.name} assigned to this job`);
+      await notify(nj,['tech'],'New job assigned',`${j.no} · ${jobTitle(j)} · ${j.customerName||''}, ${j.island||''}${j.slot?' · '+slotText(j.slot):''}`);
+      await notify(nj,['customer'],'Technician assigned',`${j.no} · ${t.name} will do your service${j.slot?' on '+slotText(j.slot):''}.`); }, `Assigned to ${t.name}`); },
 
   async startTrip(el){ const j=job(el.dataset.id), eta=Math.max(1,Math.min(240,+val('eta-'+j.id)||25));
     el.disabled=true; toast('Getting your location…');
     const p=await getPosOnce();
     const data={departedAt:nowISO(), etaMins:eta}; if(p){ data.loc=p; data.trail=[{lat:p.lat,lng:p.lng}]; GPS.lastWrite=Date.now(); GPS.last=p; }
-    await run(async()=>{ await F.updateDoc(jobRef(j.id),data); await log(j.id,`${myName()} left for the job. Expected in about ${eta} min`); }, p?'Trip started. Your location is shared.':'Trip started, but location is off. Allow location access so the customer can follow you.');
+    await run(async()=>{ await F.updateDoc(jobRef(j.id),data); await event(j,`${myName()} is on the way. Expected in about ${eta} min`,['customer','office'],'Technician on the way'); }, p?'Trip started. Your location is shared.':'Trip started, but location is off. Allow location access so the customer can follow you.');
     el.disabled=false; },
-  arrived(el){ const j=job(el.dataset.id); run(async()=>{ await F.updateDoc(jobRef(j.id),{arrivedAt:nowISO()}); await log(j.id,`${myName()} arrived on site`); stopGPS(); }, 'Arrival recorded'); },
+  arrived(el){ const j=job(el.dataset.id); stopGPS();
+    const pts=[...(j.trail||[]), ...(j.loc?[j.loc]:[])]; let km=0; for(let i=1;i<pts.length;i++) km+=haversineKm(pts[i-1],pts[i]);
+    const trip={mins:Math.max(1,Math.round((Date.now()-new Date(j.departedAt))/60000)), km:Math.round(km*10)/10};
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{arrivedAt:nowISO(), trip, loc:F.deleteField(), trail:F.deleteField()}); CLEARED.add(j.id);
+      await event(j,`${myName()} has arrived`,['customer','office'],'Technician has arrived'); }, 'Arrival recorded. Location sharing stopped.'); },
   finish(el){ const j=job(el.dataset.id), notes=val('wn-'+j.id), parts=val('wp-'+j.id);
     if(!notes) return toast('Describe the work done before finishing.');
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{finishedAt:nowISO(), workNotes:notes, parts}); await log(j.id,`Work finished by ${myName()}`); }, 'Job marked finished'); },
+    stopGPS();
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{finishedAt:nowISO(), workNotes:notes, parts, loc:F.deleteField(), trail:F.deleteField()});
+      await event(j,`Work finished by ${myName()}: ${notes}`,['customer','office'],'Service finished'); }, 'Job marked finished'); },
 
   sendInvoice(el){ const j=job(el.dataset.id), key='i-'+j.id, e=UI.ed[key];
     const lines=e.lines.filter(l=>String(l.desc).trim()).map(l=>({desc:String(l.desc).trim(),qty:+l.qty||0,rate:r2(l.rate)}));
@@ -716,29 +950,35 @@ const ACT = {
           lines:[{acct:'1100',dr:t.total},{acct:'4000',cr:t.net},{acct:'2100',cr:t.gst}].filter(l=>(l.dr||l.cr)>0)});
         UI._lastInv=inv;
       });
-      await log(j.id,`Invoice ${UI._lastInv.no} sent: ${money(UI._lastInv.total)}, due ${fd(UI._lastInv.dueDate)}`); delete UI.ed[key];
+      await event(j,`Invoice ${UI._lastInv.no}: ${money(UI._lastInv.total)}, due ${fd(UI._lastInv.dueDate)}`,['customer'],'Your invoice is ready'); delete UI.ed[key];
     }, 'Invoice sent and posted to accounts').finally(()=>el.disabled=false); },
 
-  pay(el){ const j=job(el.dataset.id), m=el.dataset.m, I=j.invoice;
-    if(!METHODS[m].transfer) return run(async()=>{ await F.updateDoc(jobRef(j.id),{payment:{method:m,status:'pending',amount:I.total,requestedAt:nowISO()}}); await log(j.id,`Customer will pay ${money(I.total)} by ${METHODS[m].n.toLowerCase()} on site`); }, 'Noted. Pay the technician or the office.');
-    const ref=val('pr-'+j.id); if(!ref) return toast("Enter the transfer reference from your bank app.");
-    run(async()=>{ const b=F.writeBatch(db);
-      b.update(jobRef(j.id),{payment:{method:m,ref,amount:I.total,status:'paid',verified:false,paidAt:nowISO()}});
-      b.set(d('ledger','pay-'+j.id), payEntry(j,m,ref));
-      await b.commit(); await log(j.id,`Payment of ${money(I.total)} sent by ${METHODS[m].n} · Ref ${ref}`); }, 'Payment recorded. Thank you!'); },
+  pay(el){ const j=job(el.dataset.id), m=el.dataset.m, I=j.invoice, r=UI.rcpt[j.id], at=nowISO();
+    const withReceipt = b => { if(!r) return {}; b.set(d('jobs',j.id,'files','receipt'),{...r, at, uid:ME.user.uid}); return {receipt:{name:r.name, type:r.type, at}}; };
+    if(!METHODS[m].transfer) return run(async()=>{ const b=F.writeBatch(db); const extra=withReceipt(b);
+      b.update(jobRef(j.id),{payment:{method:m,status:'pending',amount:I.total,requestedAt:at}, ...extra}); await b.commit(); delete UI.rcpt[j.id];
+      await event(j,`Customer will pay ${money(I.total)} by ${METHODS[m].n.toLowerCase()} on site`,['office','tech'],'Payment to collect'); }, 'Noted. Pay the technician or the office.');
+    const ref=val('pr-'+j.id); if(!ref && !r) return toast('Enter the bank reference or upload the receipt.');
+    el.disabled=true;
+    run(async()=>{ const b=F.writeBatch(db); const extra=withReceipt(b);
+      b.update(jobRef(j.id),{payment:{method:m,ref,amount:I.total,status:'paid',verified:false,paidAt:at}, ...extra});
+      b.set(d('ledger','pay-'+j.id), payEntry(j,m,ref||'receipt uploaded'));
+      await b.commit(); delete UI.rcpt[j.id];
+      await event(j,`${money(I.total)} paid by ${METHODS[m].n}${ref?' · Ref '+ref:''}${r?' · receipt attached':''}. Please verify.`,['office'],'Payment received'); }, 'Payment details sent. Thank you!').finally(()=>el.disabled=false); },
   confirmPay(el){ const j=job(el.dataset.id); settle(j, j.payment.method, j.payment.ref||'', 'Payment recorded'); },
   recordPay(el){ const j=job(el.dataset.id); settle(j, val('rp-m-'+j.id)||'cash', val('rp-r-'+j.id), 'Payment recorded'); },
-  verifyPay(el){ const j=job(el.dataset.id); run(async()=>{ await F.updateDoc(jobRef(j.id),{'payment.verified':true}); await log(j.id,'Bank transfer confirmed by the office'); }, 'Marked as received'); },
+  verifyPay(el){ const j=job(el.dataset.id); run(async()=>{ await F.updateDoc(jobRef(j.id),{'payment.verified':true}); await event(j,`Your payment of ${money(j.payment.amount)} is confirmed. Thank you!`,['customer'],'Payment confirmed'); }, 'Marked as received'); },
   reversePay(el){ const j=job(el.dataset.id), k='rev'+j.id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
-    run(async()=>{ const b=F.writeBatch(db); b.update(jobRef(j.id),{payment:F.deleteField()}); b.delete(d('ledger','pay-'+j.id)); await b.commit(); await log(j.id,`Payment ${j.payment.ref||''} reversed: the transfer was not received`); }, 'Payment reversed'); },
+    run(async()=>{ const b=F.writeBatch(db); b.update(jobRef(j.id),{payment:F.deleteField()}); b.delete(d('ledger','pay-'+j.id)); await b.commit(); await event(j,`We couldn't find your transfer${j.payment.ref?' ('+j.payment.ref+')':''}. Please check it and pay again, or contact us.`,['customer'],'Payment not received'); }, 'Payment reversed'); },
 
   rate(el){ const j=job(el.dataset.id), n=+(document.querySelector(`input[name="rt-${j.id}"]:checked`)?.value||0), text=val('rf-'+j.id);
     if(!n) return toast('Choose 1 to 5 stars.');
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{rating:{stars:n,text,at:nowISO()}}); await log(j.id,`Customer rated the service ${n} of 5`); }, 'Thanks for your feedback'); },
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{rating:{stars:n,text,at:nowISO()}}); await event(j,`Rated ${n} of 5${text?': “'+text+'”':''}`,['office','tech'],'New customer rating'); }, 'Thanks for your feedback'); },
   sendMsg(el){ const j=job(el.dataset.id), text=val('msg-'+j.id); if(!text) return;
-    run(async()=>{ await F.addDoc(c('jobs',j.id,'messages'),msgObj(text)); const t=document.getElementById('msg-'+j.id); if(t) t.value=''; }); },
+    run(async()=>{ await F.addDoc(c('jobs',j.id,'messages'),msgObj(text)); const t=document.getElementById('msg-'+j.id); if(t) t.value='';
+      await notify(j,['office','customer','tech'],`Message from ${myName()}`,`${j.no} · ${text.slice(0,180)}`); }); },
   cancelJob(el){ const j=job(el.dataset.id), k='cancel'+j.id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{cancelled:true}); await log(j.id,`Request cancelled by ${ME.role==='customer'?'the customer':'the office'}`); }, 'Request cancelled'); },
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{cancelled:true}); await event(j,`Request cancelled by ${ME.role==='customer'?'the customer':'the office'}`,['office','customer','tech'],'Request cancelled'); }, 'Request cancelled'); },
 };
 function payEntry(j, method, ref){
   const amt=j.invoice.total;
@@ -748,7 +988,7 @@ function settle(j, method, ref, okText){
   run(async()=>{ const b=F.writeBatch(db);
     b.update(jobRef(j.id),{payment:{method,ref:ref||'',amount:j.invoice.total,status:'paid',verified:true,paidAt:nowISO()}});
     b.set(d('ledger','pay-'+j.id), payEntry(j,method,ref));
-    await b.commit(); await log(j.id,`Payment of ${money(j.invoice.total)} received by ${METHODS[method]?.n||method}`); }, okText);
+    await b.commit(); await event(j,`Payment of ${money(j.invoice.total)} received by ${METHODS[method]?.n||method}. Thank you!`,['customer'],'Payment confirmed'); }, okText);
 }
 const FORMS = {
   async signin(f,dd){ await run(()=>A.signInWithEmailAndPassword(auth, dd.email, dd.password)); },
@@ -763,6 +1003,8 @@ const FORMS = {
   async reset(f,dd){ await run(()=>A.sendPasswordResetEmail(auth, dd.email), 'Check your email for the reset link'); UI.authMode='signin'; render(); }
 };
 const CHANGE = {
+  async receiptFile(el){ const f=el.files?.[0]; if(!f) return; toast('Preparing the receipt…');
+    try{ UI.rcpt[el.dataset.id]=await readReceipt(f); render(); }catch(e){ toast(e.message||'Could not read that file.'); el.value=''; } },
   addSvcLine(el){ const s=sv(el.value); if(!s) return; UI.ed[el.dataset.key].lines.push({desc:s.name,qty:1,rate:s.price}); render(); },
   payMethod(el){ UI.payM[el.dataset.id]=el.value; render(); }
 };
@@ -782,8 +1024,12 @@ const sendReset = email => A.sendPasswordResetEmail(auth, email);
 /** Each portal entry file calls start({view, actions, forms, change}). */
 function start(def){
   Object.assign(P, def);
-  if(CONFIGURED) startAuth();
+  const qj=new URLSearchParams(location.search).get('job');
+  if(qj){ UI.pendingJob=qj; try{ history.replaceState(null,'',location.pathname); }catch(e){} }
+  if(CONFIGURED){ startAuth(); registerSW(); }
+  navigator.serviceWorker?.addEventListener('message', e=>{ if(e.data?.type==='open'){ const id=new URL(e.data.url, location.href).searchParams.get('job'); if(id){ if(job(id)) openJobById(id); else UI.pendingJob=id; render(); } } });
+  document.addEventListener('keydown', e=>{ if(e.key==='Escape' && (UI.bell||UI.modal)){ UI.bell=false; UI.modal=null; render(); } });
   render();
 }
 
-export { ACCTS, ACT, AC_TYPES, BTUS, CHANGE, CUR, F, FORMS, GPS, HERO, MAPS, ME, METHODS, OWNER_EXISTS, P, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, S, ST, STEPS, SVC_ICONS, TZ, UI, WINDOWS, addDays, ago, appMod, attachMaps, auth, authView, avgRating, balances, brandName, busyTech, c, clone, co, completeProfileView, createLogin, createMap, createProfile, cust, d, db, docView, ensureGPS, errMsg, esc, etaHTML, fd, fdt, ft, gateView, getPosOnce, haversineKm, header, hint, icon, initials, invoiceSec, job, jobDetail, jobItem, jobRef, jobTitle, lineEditor, loadUI, log, markSVG, messagesSec, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, nowISO, overdue, pad, payEntry, payPanel, pickDefault, pill, portalLink, profileExtraFields, quoteSec, r2, ratingSec, ready, render, requestSec, rq, run, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, settle, setupView, sideBal, slotText, snapList, stage, stars, start, startAuth, startSubs, stopGPS, stopSubs, subCol, sv, syncMsgSub, sys, t12, tech, techNext, techSec, toast, toastT, today, totHTML, totals, tracker, trackingSec, unsubs, updateMap, updateTotals, val, view, workSec };
+export { A, ACCTS, ACT, AC_TYPES, BTUS, CHANGE, CLEARED, CONFIG_ERROR, CUR, F, FORMS, GPS, HERO, MAPS, ME, METHODS, OWNER_EXISTS, P, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, addDays, ago, alertItem, appMod, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, busyTech, c, clone, co, completeProfileView, copyBtn, createLogin, createMap, createProfile, cust, d, db, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, icon, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, lineEditor, loadUI, log, markSVG, messagesSec, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, nowISO, openJobById, overdue, pad, payEntry, payPanel, pickDefault, pill, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readReceipt, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, settle, setupView, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncMsgSub, sys, t12, tech, techNext, techSec, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateMap, updateTotals, val, view, workSec };
