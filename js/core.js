@@ -58,7 +58,7 @@ const SVC_ICONS = [
   '<path d="M4 20h16M6 20V9l6-5 6 5v11"/><path d="M10 20v-6h4v6"/>'
 ];
 /* ---------- state ---------- */
-const S = {company:null, portal:null, services:[], techs:[], customers:[], users:[], jobs:[], ledger:[], inbox:[], msgs:{}, loaded:{}, need:[], pub:{}};
+const S = {company:null, portal:null, services:[], techs:[], customers:[], users:[], jobs:[], ledger:[], inbox:[], chats:[], chat:{}, msgs:{}, loaded:{}, need:[], pub:{}};
 const ME = {user:null, profile:null, profileLoaded:false, role:null};
 let OWNER_EXISTS = null;
 let UI = loadUI();
@@ -211,14 +211,73 @@ async function notifyTo(j, rids, title, body){
 /** Record a step in the job's activity log and notify the other parties. */
 async function event(j, text, parties, title){ await log(j.id, text); await notify(j, parties, title, `${j.no?j.no+' · ':''}${text}`); }
 const unread = () => (S.inbox||[]).filter(x=>!x.read).length;
-function itemUrl(it){ return new URL(PORTAL_URL[it.portal||PORTAL] + (it.jobId ? '?job='+encodeURIComponent(it.jobId) : ''), location.href).href; }
+function itemUrl(it){ return new URL(PORTAL_URL[it.portal||PORTAL] + (it.chat ? '?chat='+encodeURIComponent(it.chat) : it.jobId ? '?job='+encodeURIComponent(it.jobId) : ''), location.href).href; }
 function pushState(){ if(!('Notification' in window)) return /iPhone|iPad|iPod/.test(navigator.userAgent) ? 'ios' : 'none'; return Notification.permission; }
 async function alertItem(it){
+  // A chat message for the conversation already on screen needs no alert.
+  if(it.chat && openChatId()===it.chat && !document.hidden){ F.updateDoc(d('inbox',inboxId(),'items',it.id),{read:true}).catch(()=>{}); return; }
   if(!document.hidden){ toast(`${it.title}: ${it.body}`); return; }
   if(pushState()!=='granted') return;
   const opts={body:it.body, tag:it.id, icon:'assets/icon-192.png', badge:'assets/icon-192.png', data:{url:itemUrl(it)}};
   try{ const reg=SW_REG || await navigator.serviceWorker?.getRegistration(); if(reg){ await reg.showNotification(it.title, opts); return; } }catch(e){}
-  try{ const n=new Notification(it.title, opts); n.onclick=()=>{ window.focus(); openJobById(it.jobId); render(); }; }catch(e){}
+  try{ const n=new Notification(it.title, opts); n.onclick=()=>{ window.focus(); it.chat ? openChat(it.chat) : openJobById(it.jobId); render(); }; }catch(e){}
+}
+
+/* ---------- office ↔ technician chat ----------
+   One private conversation per technician: chats/{techId}/messages. Customers never see it.
+   chats/{techId} keeps the last message and when each side last read it, for unread markers. */
+let chatSub={id:null, un:null};
+const MARKED=new Set();
+function openChatId(){
+  if(!ME.role) return null;
+  if(PORTAL==='admin') return UI.ptab==='chat' && UI.chatTech ? UI.chatTech : null;
+  if(PORTAL==='technician') return UI.tview==='chat' ? ME.user.uid : null;
+  return null;
+}
+function syncChatSub(){
+  const want=openChatId();
+  if(chatSub.id===want) return;
+  if(chatSub.un) chatSub.un(); chatSub={id:want, un:null};
+  if(!want) return;
+  chatSub.un=F.onSnapshot(F.query(c('chats',want,'messages'), F.orderBy('at','desc'), F.limit(200)),
+    s=>{ S.chat[want]=snapList(s).reverse(); schedRender(); }, e=>{ console.warn('chat',e); S.chat[want]=[]; schedRender(); });
+}
+function chatUnread(id){
+  const ch=(S.chats||[]).find(x=>x.id===id); if(!ch || !ch.lastAt) return false;
+  return ME.role==='provider' ? ch.lastRole==='technician' && ch.lastAt > (ch.readOffice||'') : ch.lastRole==='provider' && ch.lastAt > (ch.readTech||'');
+}
+function markChatRead(){
+  const id=openChatId(); if(!id || document.hidden || !chatUnread(id)) return;
+  const ch=S.chats.find(x=>x.id===id), key=id+ch.lastAt; if(MARKED.has(key)) return; MARKED.add(key);
+  F.setDoc(d('chats',id), {[ME.role==='provider'?'readOffice':'readTech']:nowISO()}, {merge:true}).catch(e=>console.warn('chat read',e));
+  const b=F.writeBatch(db); let n=0;
+  (S.inbox||[]).filter(x=>x.chat===id && !x.read).forEach(x=>{ b.update(d('inbox',inboxId(),'items',x.id),{read:true}); n++; });
+  if(n) b.commit().catch(()=>{});
+}
+function openChat(id, jobId){
+  if(PORTAL==='admin'){ UI.ptab='chat'; UI.chatTech=id; UI.sel=''; UI.newJob=null; }
+  else UI.tview='chat';
+  UI.chatJob=jobId||''; UI.bell=false;
+  if(innerWidth<=900) scrollTo(0,0);
+}
+function chatThread(id){
+  const msgs=S.chat[id], t=tech(id), C=co(), me=ME.user.uid;
+  const jobs=S.jobs.filter(j=>j.techId===id && !j.cancelled && j.payment?.status!=='paid');
+  const other = ME.role==='provider' ? (t?.name||'Technician') : C.name+' office';
+  let lastDay='', body='';
+  for(const m of (msgs||[])){
+    const day=fd(m.at); if(day!==lastDay){ body+=`<div class="sys">${day===fd(nowISO())?'Today':esc(day)}</div>`; lastDay=day; }
+    body+=`<div class="msg r-${esc(m.role)} ${m.uid===me?'mine':''}"><span class="who">${esc(m.name)}${m.role==='provider'?' · Office':''} · ${ft(m.at)}</span>
+      ${m.jobId?`<button class="job-chip" data-act="chatOpenJob" data-id="${esc(m.jobId)}">${esc(m.jobNo||'Job')}</button>`:''}<p>${esc(m.text)}</p></div>`;
+  }
+  return `<div class="chat">
+    <div class="chat-h"><button class="btn sm back-chat" data-act="closeChat">← Back</button><span class="avatar">${initials(other)}</span>
+      <div style="min-width:0"><b>${esc(other)}</b><span class="small muted">${ME.role==='provider'?esc(t?.phone||''):'Private chat with the office. Customers don\'t see it.'}</span></div></div>
+    <div class="thread chat-thread" data-keep-scroll="chat-${id}">${msgs===undefined?'<div class="loading">Loading messages…</div>':msgs.length?body:`<div class="empty small"><p>No messages yet. Say hello, or ask about a job.</p></div>`}</div>
+    <div class="chat-compose">
+      ${jobs.length?`<select id="chat-job" data-np aria-label="About which job" class="chat-job"><option value="">Not about a specific job</option>${jobs.map(j=>`<option value="${j.id}" ${UI.chatJob===j.id?'selected':''}>About ${esc(j.no)} · ${esc(jobTitle(j))}${ME.role==='technician'?'':' · '+esc(j.customerName||'')}</option>`).join('')}</select>`:''}
+      <div class="row" style="flex-wrap:nowrap;align-items:flex-end"><label class="field" style="flex:1"><span class="sr">Message</span><textarea id="chat-text" rows="2" placeholder="Write a message"></textarea></label>
+      <button class="btn primary" data-act="chatSend">Send</button></div></div></div>`;
 }
 let SW_REG=null, PUSH_TOKEN=null, pushTried=null;
 async function registerSW(){
@@ -312,20 +371,22 @@ async function nextNumber(name){
 /* ---------- subscriptions ---------- */
 let unsubs=[], subRole=null, msgSub={id:null, un:null};
 function stopSubs(){ unsubs.forEach(u=>{ try{u();}catch(e){} }); unsubs=[]; subRole=null; if(msgSub.un) msgSub.un(); msgSub={id:null,un:null};
-  Object.assign(S,{services:[],techs:[],customers:[],users:[],jobs:[],openJobs:[],ledger:[],inbox:[],msgs:{},loaded:{},need:[]}); }
+  if(chatSub.un) chatSub.un(); chatSub={id:null,un:null};
+  Object.assign(S,{services:[],techs:[],customers:[],users:[],jobs:[],openJobs:[],ledger:[],inbox:[],chats:[],chat:{},msgs:{},loaded:{},need:[]}); }
 function subCol(key, q, map=snapList){ S.need.push(key); unsubs.push(F.onSnapshot(q, s=>{ S[key]=map(s); S.loaded[key]=true; schedRender(); }, e=>{ console.error(key,e); S.loaded[key]=true; toast(errMsg(e)); schedRender(); })); }
 function startSubs(){
   const role=ME.role, uid=ME.user.uid;
   if(subRole===role) return; stopSubs(); subRole=role;
   subCol('services', c('services'));
   subCol('techs', c('techs'));
-  if(role==='provider'){ subCol('customers', c('customers')); subCol('jobs', c('jobs')); subCol('ledger', c('ledger')); subCol('users', c('users')); }
+  if(role==='provider'){ subCol('customers', c('customers')); subCol('jobs', c('jobs')); subCol('ledger', c('ledger')); subCol('users', c('users')); subCol('chats', c('chats')); }
   else if(role==='customer'){
     S.need.push('customers'); unsubs.push(F.onSnapshot(d('customers',uid), s=>{ S.customers = s.exists()? [{...s.data(), id:s.id}] : []; S.loaded.customers=true; schedRender(); }, e=>{ S.loaded.customers=true; schedRender(); }));
     subCol('jobs', F.query(c('jobs'), F.where('customerId','==',uid)));
   } else if(role==='technician'){
     subCol('jobs', F.query(c('jobs'), F.where('techId','==',uid)));
     subCol('openJobs', F.query(c('jobs'), F.where('open','==',true)));
+    S.need.push('chats'); unsubs.push(F.onSnapshot(d('chats',uid), s=>{ S.chats = s.exists()? [{...s.data(), id:s.id}] : []; S.loaded.chats=true; schedRender(); }, e=>{ S.loaded.chats=true; schedRender(); }));
   }
   startInbox();
   registerPush();
@@ -412,7 +473,7 @@ function render(){
   app.querySelectorAll('[data-keep-scroll]').forEach(el=>{ const k=el.dataset.keepScroll, v=scrolls[k]; el.scrollTop = (!v || v[1]) ? el.scrollHeight : v[0]; });
   if(focus){ const el=document.getElementById(focus.id); if(el){ el.focus({preventScroll:true}); try{ if(focus.s!=null) el.setSelectionRange(focus.s,focus.e); }catch(e){} } }
   attachMaps();
-  if(ME.role) syncMsgSub();
+  if(ME.role){ syncMsgSub(); syncChatSub(); markChatRead(); }
   ensureGPS();
 }
 
@@ -435,6 +496,7 @@ function view(){
   if((ME.profile.status||'active')!=='active') return gateView('Your account is paused', `Please contact ${esc(co().name)}${co().phone?' on '+esc(co().phone):''}.`);
   if(!ready()) return header()+`<div class="loading">Loading…</div>`;
   if(UI.pendingJob && job(UI.pendingJob)){ openJobById(UI.pendingJob); UI.pendingJob=null; }
+  if(UI.pendingChat && ME.role!=='customer'){ openChat(UI.pendingChat); UI.pendingChat=null; }
   const note = PORTAL==='customer'? PCFG().customerNotice : PORTAL==='technician'? PCFG().techNotice : '';
   return header() + `<main class="wrap">${note?`<div class="notice"><b>${esc(co().name)}:</b> ${esc(note)}</div>`:''}${P.view()}</main>` + bellPanel() + modalView();
 }
@@ -569,6 +631,7 @@ function jobDetail(j){
   if(s!=='cancelled') h+=tracker(j);
   if(role==='technician') h+=techNext(j);
   if(j.departedAt) h+=trackingSec(j);
+  if(role==='technician') h+=`<div class="sec"><div class="row" style="justify-content:space-between"><span class="small muted">Questions about this job? Customers don't see this chat.</span><button class="btn sm" data-act="openChat" data-job="${j.id}">Message the office</button></div></div>`;
   h+=requestSec(j)+scheduleSec(j)+quoteSec(j)+techSec(j);
   if(j.finishedAt) h+=workSec(j);
   h+=invoiceSec(j)+ratingSec(j)+messagesSec(j);
@@ -661,6 +724,7 @@ function techSec(j){
   const t=tech(j.techId), showT = t && (role==='provider' || accepted(j));
   let h=`<div class="sec"><div class="sec-h"><h3>Technician</h3>${role==='provider'&&j.techId?(accepted(j)?`<span class="pill teal">Accepted ${j.acceptedAt?ft(j.acceptedAt):''}</span>`:`<span class="pill mango">Waiting for ${esc(t?.name?.split(' ')[0]||'technician')} to accept</span>`):role==='provider'&&j.open?'<span class="pill orchid">Open to all technicians</span>':''}</div>`;
   if(showT){ const ar=avgRating(t.id); h+=`<div class="row"><span class="avatar">${initials(t.name)}</span><div><b>${esc(t.name)}</b><p class="small muted">${role==='customer' && !PCFG().showTechPhone ? '' : esc(t.phone||'')}${ar?' · '+stars(ar.avg)+' '+ar.avg.toFixed(1):''}</p></div></div>`; }
+  if(role==='provider' && t) h+=`<div><button class="btn sm" data-act="openChat" data-id="${t.id}" data-job="${j.id}">Chat with ${esc(t.name.split(' ')[0])} about this job</button></div>`;
   if(role==='provider'){
     if(j.declined && !j.techId) h+=`<div class="callout coral"><b>${esc(j.declined.name)} declined this job</b><p class="small">${fdt(j.declined.at)}${j.declined.reason?' · “'+esc(j.declined.reason)+'”':''}</p></div>`;
     if(j.open) h+=`<div class="callout"><p class="small">Offered to every technician ${j.offerAt?'since '+fdt(j.offerAt):''}. The first one to take it gets it, and you'll be notified.</p><div><button class="btn sm" data-act="stopOffer" data-id="${j.id}">Stop offering</button></div></div>`;
@@ -914,7 +978,23 @@ const ACT = {
   modalClose(){ UI.modal=null; render(); },
   openItem(el){ const it=(S.inbox||[]).find(x=>x.id===el.dataset.id); UI.bell=false;
     if(it && !it.read) F.updateDoc(d('inbox',inboxId(),'items',it.id),{read:true}).catch(()=>{});
-    if(it?.jobId && job(it.jobId)) openJobById(it.jobId); render(); },
+    if(it?.chat) openChat(it.chat, it.jobId); else if(it?.jobId && job(it.jobId)) openJobById(it.jobId); render(); },
+  openChat(el){ openChat(ME.role==='technician' ? ME.user.uid : el.dataset.id, el.dataset.job); saveUI(); render(); },
+  closeChat(){ if(PORTAL==='admin') UI.chatTech=''; else UI.tview='jobs'; render(); },
+  chatOpenJob(el){ const id=el.dataset.id; if(!job(id)) return toast("That job isn't in your list any more.");
+    if(PORTAL==='technician') UI.tview='jobs'; openJobById(id); render(); },
+  chatSend(){ const id=openChatId(), ta=document.getElementById('chat-text'), text=(ta?.value||'').trim(); if(!id || !text) return;
+    const jid=document.getElementById('chat-job')?.value||'', j=jid?job(jid):null, at=nowISO();
+    const name = ME.role==='provider' ? (ME.profile?.name||'Office') : myName();
+    const msg={uid:ME.user.uid, role:ME.role, name, text, at, ...(j?{jobId:j.id, jobNo:j.no||''}:{})};
+    ta.value=''; UI.chatJob='';
+    run(async()=>{
+      await F.addDoc(c('chats',id,'messages'), msg);
+      await F.setDoc(d('chats',id), {lastAt:at, lastText:text.slice(0,140), lastRole:ME.role, lastName:name, [ME.role==='provider'?'readOffice':'readTech']:at}, {merge:true});
+      const rid = ME.role==='provider' ? id : 'office';
+      await F.addDoc(c('inbox',rid,'items'), {title:`Message from ${name}${ME.role==='provider'?' (office)':''}`, body:`${j?j.no+' · ':''}${text.slice(0,300)}`, chat:id, jobId:j?.id||'', jobNo:j?.no||'',
+        at, read:false, from:ME.user.uid, fromName:name, portal:ME.role==='provider'?'technician':'admin'}).catch(e=>console.warn('chat notify',e));
+    }); },
   readAll(){ const b=F.writeBatch(db); (S.inbox||[]).filter(x=>!x.read).forEach(x=>b.update(d('inbox',inboxId(),'items',x.id),{read:true})); b.commit().catch(e=>toast(errMsg(e))); },
   async enablePush(){
     try{ const p=await Notification.requestPermission(); if(p!=='granted'){ toast('Alerts were not allowed on this device.'); return render(); }
@@ -1104,12 +1184,17 @@ const sendReset = email => A.sendPasswordResetEmail(auth, email);
 /** Each portal entry file calls start({view, actions, forms, change}). */
 function start(def){
   Object.assign(P, def);
-  const qj=new URLSearchParams(location.search).get('job');
-  if(qj){ UI.pendingJob=qj; try{ history.replaceState(null,'',location.pathname); }catch(e){} }
+  const qs=new URLSearchParams(location.search), qj=qs.get('job'), qc=qs.get('chat');
+  if(qj) UI.pendingJob=qj;
+  if(qc) UI.pendingChat=qc;
+  if(qj||qc){ try{ history.replaceState(null,'',location.pathname); }catch(e){} }
   if(CONFIGURED){ startAuth(); registerSW(); }
-  navigator.serviceWorker?.addEventListener('message', e=>{ if(e.data?.type==='open'){ const id=new URL(e.data.url, location.href).searchParams.get('job'); if(id){ if(job(id)) openJobById(id); else UI.pendingJob=id; render(); } } });
+  navigator.serviceWorker?.addEventListener('message', e=>{ if(e.data?.type!=='open') return; const q=new URL(e.data.url, location.href).searchParams, id=q.get('job'), ch=q.get('chat');
+    if(ch) openChat(ch); else if(id){ if(job(id)) openJobById(id); else UI.pendingJob=id; } render(); });
+  // Enter sends a chat message on a computer; Shift+Enter adds a new line.
+  document.addEventListener('keydown', e=>{ if(e.target.id==='chat-text' && e.key==='Enter' && !e.shiftKey && !matchMedia('(pointer:coarse)').matches){ e.preventDefault(); ACT.chatSend(); } });
   document.addEventListener('keydown', e=>{ if(e.key==='Escape' && (UI.bell||UI.modal)){ UI.bell=false; UI.modal=null; render(); } });
   render();
 }
 
-export { A, ACCTS, ACT, AC_TYPES, BTUS, CHANGE, CLEARED, CONFIG_ERROR, CUR, F, FORMS, GPS, HERO, MAPS, ME, METHODS, OWNER_EXISTS, P, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, busyTech, c, clone, co, completeProfileView, copyBtn, createLogin, createMap, createProfile, cust, d, db, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, icon, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, lineEditor, loadUI, log, markSVG, messagesSec, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readReceipt, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, settle, setupView, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncMsgSub, sys, t12, tech, techNext, techSec, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateMap, updateTotals, val, view, workSec };
+export { A, ACCTS, ACT, AC_TYPES, BTUS, CHANGE, CLEARED, CONFIG_ERROR, CUR, F, FORMS, GPS, HERO, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, busyTech, c, chatSub, chatThread, chatUnread, clone, co, completeProfileView, copyBtn, createLogin, createMap, createProfile, cust, d, db, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, icon, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, lineEditor, loadUI, log, markChatRead, markSVG, messagesSec, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readReceipt, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, settle, setupView, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateMap, updateTotals, val, view, workSec };
