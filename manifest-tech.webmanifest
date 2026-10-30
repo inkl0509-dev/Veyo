@@ -1,8 +1,8 @@
 {
-  "name": "AC Service \u00b7 Technician Portal",
+  "name": "AC Service · Technician Portal",
   "short_name": "AC Tech",
   "description": "Your AC service jobs and live trips.",
-  "start_url": "/tech.html",
+  "start_url": "./tech",
   "scope": "/",
   "display": "standalone",
   "background_color": "#F1F6FA",
