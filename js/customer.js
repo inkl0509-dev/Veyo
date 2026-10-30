@@ -1,6 +1,7 @@
 /* Customer portal: home screen with what needs attention, step-by-step booking with a price estimate,
    simple job pages with one clear next step, payments with receipts, and alerts for every update. */
 import * as K from './core.js';
+import { btuCalculator, btu as calcBtu, bookingSize } from './tools.js';
 const { S, ME, UI, F, db, WINDOWS, AC_TYPES, BTUS, SVC_ICONS, METHODS, TZ, esc, money, today, addDays, nowISO, fd, ft, slotText,
   job, sv, tech, co, PCFG, stage, pill, jobTitle, myCustomer, pickDefault, run, toast, render, saveUI, d, c, event, initials,
   trackingSec, quoteSec, invoiceSec, ratingSec, workSec, messagesSec, avgRating, stars, etaHTML, totals, overdue, staleTrip,
@@ -54,12 +55,22 @@ function home(me){
     <div class="hello-acts"><button class="btn coral lg" data-act="startBook">Book a service</button>${lastJob()?`<button class="btn lg" data-act="bookAgain" data-id="${lastJob().id}">Book ${esc(jobTitle(lastJob()))} again</button>`:''}${callBtn('lg')}</div></section>
   ${pushBanner()}
   ${live?liveCard(live):''}
+  ${nextServiceCard(jobs)}
   ${todo.length?`<section class="csec"><h2>Needs your attention</h2><div class="todo">${todo.map(todoItem).join('')}</div></section>`:''}
   ${upcoming.length?`<section class="csec"><h2>In progress</h2><div class="cards">${upcoming.map(jobCard).join('')}</div></section>`:''}
   ${S.services.length?`<section class="csec"><h2>Our services</h2><div class="svc-grid">${S.services.slice(0,6).map(svcTile).join('')}</div></section>`:''}
   ${!jobs.length?howItWorks():''}
   ${recent.length?`<section class="csec"><div class="row" style="justify-content:space-between"><h2>Recent</h2><button class="linkbtn" data-act="ctab" data-v="jobs">See all</button></div><div class="cards">${recent.map(jobCard).join('')}</div></section>`:''}
   ${contactCard()}`;
+}
+// From the last service report: when the next service is due.
+function nextServiceCard(jobs){
+  const last=jobs.find(j=>j.reportSentAt && j.report?.nextService); if(!last) return '';
+  if(jobs.some(j=>!j.cancelled && (j.createdAt||'')>(last.createdAt||'') && j!==last)) return '';
+  const due=last.report.nextService, days=Math.round((new Date(due)-new Date(today()))/864e5);
+  if(days>30) return '';
+  return `<section class="next-svc ${days<0?'late':''}"><div><b>${days<0?'Your AC service is overdue':'Your AC service is due '+(days===0?'today':days===1?'tomorrow':'in '+days+' days')}</b>
+    <span>Regular service keeps it cool and saves power. Due ${fd(due)}.</span></div><button class="btn primary" data-act="bookAgain" data-id="${last.id}">Book now</button></section>`;
 }
 function pushBanner(){
   if(pushState()!=='default' || UI.pushLater) return '';
@@ -153,7 +164,7 @@ function customerJob(j){
   if(j.invoice && j.payment?.status!=='paid') h+=invoiceSec(j);
   if(j.finishedAt && !j.rating) h+=ratingSec(j);
   h+=detailsSec(j);
-  if(j.finishedAt) h+=workSec(j);
+  if(j.finishedAt) h+=K.reportSec(j)+workSec(j);
   if(j.departedAt && j.finishedAt) h+=trackingSec(j);
   if(j.quote && j.quote.status!=='sent') h+=quoteSec(j);
   if(j.invoice && j.payment?.status==='paid') h+=invoiceSec(j);
@@ -212,7 +223,7 @@ function bkNeed(b){
     <div class="field"><span>How many AC units?</span><div class="stepper"><button data-act="bkUnits" data-d="-1" aria-label="Fewer units">−</button><b>${b.units}</b><button data-act="bkUnits" data-d="1" aria-label="More units">+</button></div></div>
     <div class="field"><span>What's wrong? <small class="muted">(optional, pick any)</small></span><div class="chips big">${ISSUES.map(v=>`<button class="chip" data-act="bkIssue" data-v="${esc(v)}" aria-pressed="${b.issues.includes(v)}">${esc(v)}</button>`).join('')}</div></div>
     ${b.more?`<div class="field"><span>Type of AC</span>${chips('acType',AC_TYPES,b.acType)}</div>
-      <div class="field"><span>Size <small class="muted">(on the sticker on the indoor unit)</small></span>${chips('btu',BTUS,b.btu)}</div>
+      <div class="field"><span>Size <small class="muted">(on the sticker on the indoor unit)</small></span>${chips('btu',BTUS,b.btu)}<button class="linkbtn" data-act="btuHelp" style="margin-top:6px">Not sure? Work it out from the room size</button></div>
       <label class="field"><span>Anything else? <small class="muted">(optional)</small></span><textarea id="bk-note" data-bk="note" placeholder="e.g. The bedroom unit drips water at night">${esc(b.note)}</textarea></label>`
     :`<button class="more-row" data-act="bkMore"><span><b>${esc(b.acType)} · ${esc(b.btu)}</b><small>AC type, size and a note (optional)</small></span><span class="linkbtn">Change</span></button>`}`;
 }
@@ -284,6 +295,8 @@ const actions = {
     if(b.step===2 && (!b.island.trim() || !b.address.trim())){ b.editAddr=true; render(); return toast('Enter your island and address.'); }
     b.step++; render(); scrollTo(0,0); },
   bkMore(){ UI.bk.more=true; render(); },
+  btuHelp(){ UI.modal={title:'Which AC size do I need?', html:btuCalculator(true)}; render(); },
+  useBtu(){ const r=calcBtu(UI.btu||{}); if(!r) return toast("Enter the room's length and width."); UI.bk.btu=bookingSize(r); UI.bk.more=true; UI.modal=null; render(); toast('Size set to '+UI.bk.btu); },
   bkEditAddr(){ UI.bk.editAddr=true; render(); },
   bookAgain(el){ const j=job(el.dataset.id); UI.bk=newBooking(null, j); UI.ctab='book'; UI.sel=''; saveUI(); render(); scrollTo(0,0); },
   toMessages(el){ const t=document.getElementById('msg-'+el.dataset.id); if(t){ t.scrollIntoView({behavior:'smooth',block:'center'}); setTimeout(()=>t.focus({preventScroll:true}),350); } },
