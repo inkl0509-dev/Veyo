@@ -1,8 +1,8 @@
 /* Admin / service-provider portal: runs the service desk and controls the customer and technician portals. */
 import * as K from './core.js';
-const { S, ME, UI, F, db, ACCTS, METHODS, WINDOWS, CUR, PORTAL_URL, PORTAL_NAME, portalLink,
+const { S, ME, UI, F, db, ACCTS, METHODS, WINDOWS, CUR, PORTAL_URL, PORTAL_NAME, portalLink, portalHref, tenantRef, CO,
   esc, money, r2, fd, fdt, today, addDays, nowISO, initials, stars, avgRating, hint, stage, jobTitle, job, sv, co, PCFG,
-  balances, sideBal, pill, jobItem, jobDetail, run, toast, render, saveUI, d, c, log, event, createLogin, pickDefault, val, chatThread, chatUnread, ago, BRAND_PRESETS, brandPalette, readLogo, defaultMarkSvg } = K;
+  balances, sideBal, pill, jobItem, jobDetail, run, toast, render, saveUI, d, c, log, event, createLogin, pickDefault, val, chatThread, chatUnread, ago, loaded, BRAND_PRESETS, brandPalette, readLogo, defaultMarkSvg } = K;
 
 function providerView(){
   const n=S.jobs.filter(j=>hint(j)).length;
@@ -10,6 +10,9 @@ function providerView(){
   const tabs=[['jobs','Service requests',n],['chat','Team chat',unreadChats],['customers','Customers'],['team','Team'],['portals','Portal controls'],['accounting','Accounting'],['settings','Company & services']];
   let h=`<nav class="tabs" role="tablist">${tabs.map(([k,l,cnt])=>`<button role="tab" aria-selected="${UI.ptab===k}" data-act="ptab" data-v="${k}">${l}${cnt?`<span class="count">${cnt}</span>`:''}</button>`).join('')}</nav>`;
   if(!S.services.length || !S.company?.address) h+=`<div class="notice"><b>Finish setting up.</b> Add your address, GST TIN, bank accounts, office location and the services you offer. Customers see them when booking and on every quotation and invoice. <button class="linkbtn" data-act="ptab" data-v="settings">Open company settings</button></div>`;
+  // Each tab waits only for its own data.
+  const NEEDS={customers:['customers','users'], team:['techs','users'], chat:['chats','techs'], accounting:['ledger'], settings:['services'], portals:[]};
+  if(UI.ptab!=='jobs' && !loaded(...(NEEDS[UI.ptab]||[]))) return h+'<div class="loading">Loading…</div>';
   if(UI.ptab==='jobs') h+= UI.newJob ? newJobForm() : providerJobs();
   else if(UI.ptab==='chat') h+=chatTab();
   else if(UI.ptab==='customers') h+=customersView();
@@ -123,7 +126,7 @@ function teamView(){
 /* ---------- portal controls ---------- */
 function portalsView(){
   const p=PCFG();
-  const link=(k)=>`<div class="callout"><span class="label">${PORTAL_NAME[k]}</span><div class="row"><span class="mono" style="overflow-wrap:anywhere">${esc(portalLink(k))}</span></div><div class="row"><a class="btn sm" href="${PORTAL_URL[k]}" target="_blank" rel="noopener">Open ↗</a><button type="button" class="btn sm" data-act="copy" data-v="${esc(portalLink(k))}">Copy link</button></div></div>`;
+  const link=(k)=>`<div class="callout"><span class="label">${PORTAL_NAME[k]}</span><div class="row"><span class="mono" style="overflow-wrap:anywhere">${esc(portalLink(k))}</span></div><div class="row"><a class="btn sm" href="${portalHref(k)}" target="_blank" rel="noopener">Open ↗</a><button type="button" class="btn sm" data-act="copy" data-v="${esc(portalLink(k))}">Copy link</button></div></div>`;
   const tog=(name,label,help)=>`<label class="opt"><input type="checkbox" id="pc-${name}" name="${name}" ${p[name]?'checked':''}><span><b>${label}</b><span class="small muted">${help}</span></span></label>`;
   return `<form data-form="portal" class="stack">
     <div class="cols">${link('customer')}${link('technician')}</div>
@@ -306,7 +309,9 @@ const forms = {
     const p=UI.pick.co || pickDefault('co');
     const data={name:dd.name,tagline:dd.tagline||'',phone:dd.phone||'',email:dd.email||'',reg:dd.reg||'',tin:dd.tin||'',address:dd.address||'',bml:dd.bml||'',mib:dd.mib||'',gstRate:+dd.gstRate||0,terms:+dd.terms||0,methods};
     if(p){ data.lat=p.lat; data.lng=p.lng; }
-    run(()=>F.setDoc(d('company','profile'),data), 'Company details saved'); },
+    run(async()=>{ await F.setDoc(d('company','profile'),data,{merge:true});
+      // Keep the name on the platform's company list in step.
+      await F.updateDoc(tenantRef(),{name:data.name, updatedAt:nowISO()}).catch(e=>console.warn('company name',e)); }, 'Company details saved'); },
   svc(f,dd){ run(()=>F.updateDoc(d('services',f.dataset.id),{name:dd.name, price:r2(dd.price), desc:dd.desc||''}), 'Service saved'); },
   addSvc(f,dd){ run(async()=>{ await F.addDoc(c('services'),{name:dd.name,price:r2(dd.price),desc:dd.desc||''}); f.reset(); }, 'Service added'); },
   portal(f,dd){ const windows={}; Object.keys(WINDOWS).forEach(k=>windows[k]=!!dd['w-'+k]);
