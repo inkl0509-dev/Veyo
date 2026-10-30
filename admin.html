@@ -6,21 +6,44 @@
   <title>AC Service · Admin Portal</title>
   <meta name="description" content="Run the service desk: requests, quotations, technicians, invoices, accounting and portal controls.">
   <meta name="theme-color" content="#0B2545">
-  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-  <link rel="manifest" href="manifest-admin.webmanifest">
-  <link rel="apple-touch-icon" href="assets/icon-192.png">
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest-admin.webmanifest">
+  <link rel="apple-touch-icon" href="/assets/icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
+  <!-- Start every connection and download at once, instead of one file after another. -->
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://identitytoolkit.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://securetoken.googleapis.com" crossorigin>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-  <link rel="stylesheet" href="css/styles.css">
+  <link rel="modulepreload" href="/js/admin.js">
+  <link rel="modulepreload" href="/js/core.js">
+  <link rel="modulepreload" href="/js/firebase-config.js">
+  <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js" crossorigin>
+  <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js" crossorigin>
+  <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js" crossorigin>
+  <link rel="stylesheet" href="/css/styles.css">
+  <!-- Fonts don't hold up the first paint; the page shows with system fonts and swaps when they arrive. -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"></noscript>
 </head>
 <body data-portal="admin">
-  <div id="app"><div class="loading">Opening the service desk…</div></div>
+  <div id="app"><div class="loading">Opening…</div></div>
   <div id="toast" hidden></div>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script type="module" src="js/admin.js"></script>
+  <script>
+    /* Show this company's colours and the last screen straight away, while the live data loads. */
+    (function(){try{
+      var m=location.search.match(/[?&]c=([a-z0-9-]+)/i), seg=(location.pathname.split('/').filter(Boolean)[0]||'').toLowerCase();
+      var R=['tech','admin','platform','assets','css','js','functions','index','sw','api','www'];
+      var co=m?m[1].toLowerCase():(seg&&seg.indexOf('.')<0&&R.indexOf(seg)<0?seg:''); if(!co) return;
+      var css=localStorage.getItem('acsp-brandcss-'+co);
+      if(css){var st=document.createElement('style');st.id='brand-vars';st.textContent=css;document.head.appendChild(st);document.body.setAttribute('data-brand','');}
+      var shell=localStorage.getItem('acsp-shell-'+co+'-admin');
+      if(shell){var a=document.getElementById('app');a.innerHTML=shell;a.className='shell';}
+    }catch(e){}})();
+  </script>
+  <script type="module" src="/js/admin.js"></script>
 </body>
 </html>
