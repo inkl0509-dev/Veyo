@@ -49,5 +49,23 @@
         }
       ]
     }
+  ],
+  "rewrites": [
+    {
+      "source": "/platform",
+      "destination": "/platform.html"
+    },
+    {
+      "source": "/:co/tech",
+      "destination": "/tech.html"
+    },
+    {
+      "source": "/:co/admin",
+      "destination": "/admin.html"
+    },
+    {
+      "source": "/:co",
+      "destination": "/index.html"
+    }
   ]
 }
