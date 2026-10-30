@@ -591,3 +591,79 @@ body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5
 .doc-fold>summary b{font-size:1.1rem;white-space:nowrap}
 .doc-fold[open]>summary{border-bottom:1px solid var(--line)}
 .doc-fold>.doc,.doc-fold>div{margin:12px}
+
+/* ---------- AC tools ---------- */
+.grid4{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px}
+.tools{display:grid;grid-template-columns:220px minmax(0,1fr);gap:16px;align-items:start}
+.tool-nav{display:flex;flex-direction:column;gap:6px}
+.tool-nav button{text-align:left;padding:12px 14px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface);color:var(--ink);font:700 .9rem var(--f-body);cursor:pointer}
+.tool-nav button[aria-pressed="true"]{background:var(--lagoon);border-color:var(--lagoon);color:var(--lagoon-ink)}
+@media (max-width:760px){ .tools{grid-template-columns:1fr} .tool-nav{flex-direction:row;overflow-x:auto;padding-bottom:4px} .tool-nav button{white-space:nowrap;flex:0 0 auto} }
+.tool-card .card-b{padding:16px}
+.calc{display:flex;flex-direction:column;gap:14px}
+.calc h4{margin:6px 0 -4px;font-size:.9rem}
+.calc-out{display:flex;flex-direction:column;gap:2px;padding:16px;border-radius:var(--r);background:var(--teal-soft);border:1px solid var(--line)}
+.calc-out b{font:800 1.7rem var(--f-display);color:var(--teal-text)}
+.calc-out small{color:var(--muted)}
+.calc-out.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
+.calc-out.two>div{display:flex;flex-direction:column;gap:2px}
+.pt-table{width:100%;border-collapse:collapse;margin-top:8px;font-size:.86rem}
+.pt-table th,.pt-table td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left}
+.pt-table th{font-size:.74rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.trouble{display:flex;flex-direction:column;gap:8px}
+.trouble details{border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 14px;background:var(--surface)}
+.trouble summary{font-weight:700;cursor:pointer}
+.trouble ul{margin:8px 0 2px;padding-left:20px;display:flex;flex-direction:column;gap:4px}
+.btn.wa{background:#25D366;border-color:#1fb457;color:#fff}
+.remind-list{list-style:none;margin:0;padding:0}
+.remind-list li{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;justify-content:space-between;padding:12px 16px;border-top:1px solid var(--line)}
+.remind-list li>div:first-child{display:flex;flex-direction:column;flex:1 1 220px}
+.next-svc{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:16px;border-radius:var(--r);background:var(--lagoon-soft);border:1px solid var(--line)}
+.next-svc>div{display:flex;flex-direction:column;min-width:0}
+.next-svc span{color:var(--muted);font-size:.88rem}
+.next-svc.late{background:var(--coral-soft)}
+
+/* ---------- service report ---------- */
+.report-form{display:flex;flex-direction:column;gap:14px}
+.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}
+.check{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface);cursor:pointer;font-size:.9rem;min-height:44px}
+.check input{width:20px;height:20px;accent-color:var(--teal)}
+.check:has(input:checked){border-color:var(--teal);background:var(--teal-soft)}
+.unit-in{position:relative;display:flex}
+.unit-in input{width:100%;padding-right:46px}
+.unit-in i{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-style:normal;color:var(--muted);font-size:.85rem;pointer-events:none}
+.chip-radio{display:inline-flex;cursor:pointer}
+.chip-radio input{position:absolute;opacity:0;pointer-events:none}
+.chip-radio span{border:1px solid var(--line);border-radius:999px;padding:7px 14px;font:700 .84rem var(--f-body);color:var(--muted);background:var(--surface)}
+.chip-radio input:checked+span{background:var(--lagoon);border-color:var(--lagoon);color:var(--lagoon-ink)}
+.chip-radio input:focus-visible+span{outline:2px solid var(--lagoon);outline-offset:2px}
+.modal.wide{width:min(860px,calc(100vw - 24px))}
+.report-doc{background:#fff;color:#16222e;border:1px solid #dde5ec;border-radius:var(--r);padding:22px;display:flex;flex-direction:column;gap:10px}
+.report-doc h3{margin:10px 0 0;font-size:.95rem;color:#0b2545}
+.report-doc p{margin:0}
+.rd-head{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-bottom:12px;border-bottom:3px solid var(--hero-a,#0077B6)}
+.rd-brand{display:flex;gap:10px;align-items:center}
+.rd-brand .mark{width:40px;height:40px}
+.rd-brand>div{display:flex;flex-direction:column}
+.rd-brand small,.rd-title small{color:#5b6b7a}
+.rd-title{display:flex;flex-direction:column;align-items:flex-end}
+.rd-title h2{margin:0;font:800 1.3rem var(--f-display);color:var(--hero-a,#0077B6)}
+.rd-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.rd-grid>div{display:flex;flex-direction:column;gap:2px}
+.rd-grid small{color:#5b6b7a}
+.report-doc .label{color:#5b6b7a}
+.rd-checks{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:4px 16px;font-size:.9rem}
+.rd-checks li.ok{color:#0b6b4f;font-weight:600}
+.rd-checks li.no{color:#9aa7b3}
+.rd-table{border-collapse:collapse;width:100%;max-width:460px;font-size:.9rem}
+.rd-table td{padding:5px 0;border-bottom:1px solid #e8eef3}
+.rd-next{margin-top:8px;padding:12px 14px;border-radius:10px;background:#e8f4fb;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.rd-foot{margin-top:6px;text-align:center}
+@media print{
+  body.print-report *{visibility:hidden}
+  body.print-report .modal, body.print-report .modal *{visibility:visible}
+  body.print-report .modal{position:absolute;left:0;top:0;transform:none;width:100%;max-height:none;overflow:visible;box-shadow:none}
+  body.print-report .modal-h, body.print-report .no-print, body.print-report .backdrop{display:none}
+  body.print-report .report-doc{border:0;padding:0}
+  body.print-report .pill{border:1px solid currentColor}
+}
