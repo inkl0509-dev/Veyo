@@ -16,6 +16,9 @@ const PORTAL_ROLE = ROLE_OF[PORTAL];
 const PORTAL_URL = {customer:'index.html', technician:'tech.html', admin:'admin.html'};
 // Running inside the Android app (it adds a JavaScript bridge called AndroidApp).
 const IN_APP = !!window.AndroidApp || /ACServiceApp/.test(navigator.userAgent);
+// iPhone / iPad (iPadOS reports itself as a Mac with touch). STANDALONE: opened from the Home Screen.
+const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints>1);
+const STANDALONE = matchMedia('(display-mode: standalone)').matches || navigator.standalone===true;
 /* ---------- which company ----------
    Each company has its own code, used in the address: /reefside (customers), /reefside/tech, /reefside/admin.
    ?c=reefside also works (handy for local testing). All of the company's data lives under tenants/{code}. */
@@ -169,7 +172,7 @@ function updateIcons(){
       const man={name:`${nm} · ${PORTAL_NAME[PORTAL]}`, short_name:nm.length>14? nm.slice(0,14) : nm, start_url:new URL(portalHref(PORTAL),location.href).href, scope:new URL(PATH_MODE?`/${CO}/`:'/',location.href).href, id:`${CO}-${PORTAL}`,
         display:'standalone', background_color:'#FFFFFF', theme_color:BRAND.color? brandPalette(BRAND).theme : '#0077B6',
         icons:[{src:i192,sizes:'192x192',type:'image/png'},{src:i512,sizes:'512x512',type:'image/png'},{src:i512,sizes:'512x512',type:'image/png',purpose:'maskable'}]};
-      setLink('manifest', URL.createObjectURL(new Blob([JSON.stringify(man)],{type:'application/manifest+json'})));
+      if(!IS_IOS) setLink('manifest', URL.createObjectURL(new Blob([JSON.stringify(man)],{type:'application/manifest+json'})));
     }catch(e){ console.warn('brand icons', e); }
   }, 60);
 }
@@ -444,11 +447,23 @@ function bellButton(){
   const n=unread();
   return `<button class="bell" data-act="bell" aria-label="Notifications${n?', '+n+' unread':''}" aria-expanded="${!!UI.bell}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>${n?`<span class="bell-n">${n>9?'9+':n}</span>`:''}</button>`;
 }
+/* iPhone: notifications only work from the Home Screen app (iOS 16.4 or later), so guide people there. */
+const SHARE_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="Share" style="vertical-align:-3px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><path d="M12 3v12M7 8l5-5 5 5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>`;
+function iosHidden(){ try{ return localStorage.getItem('acsp-ios-hide')===CO; }catch(e){ return false; } }
+function iosBanner(){
+  if(!IS_IOS || IN_APP || iosHidden()) return '';
+  if(!STANDALONE) return `<div class="push-banner ios"><div><b>Get notifications on your iPhone</b>
+      <span>1. Tap ${SHARE_ICON} <b>Share</b> at the bottom of Safari. 2. Tap <b>Add to Home Screen</b>, then <b>Add</b>. 3. Open <b>${esc(brandName())}</b> from your Home Screen, sign in, and tap <b>Turn on notifications</b>.</span></div>
+    <div class="row"><button class="btn sm" data-act="iosHide">Not now</button></div></div>`;
+  if(pushState()==='default' && PORTAL!=='customer') return `<div class="push-banner"><div><b>Turn on notifications</b><span>Get an alert for new jobs, messages and every update, even when the app is closed.</span></div>
+    <div class="row"><button class="btn sm primary" data-act="enablePush">Turn on notifications</button><button class="btn sm" data-act="iosHide">Not now</button></div></div>`;
+  return '';
+}
 function pushPrompt(){
   const s=pushState();
   if(s==='granted') return `<p class="bp-note ok">Alerts are on for this device.</p>`;
   if(s==='denied') return `<p class="bp-note">Alerts are blocked for this site. Allow notifications in your browser's site settings to get them.</p>`;
-  if(s==='ios') return `<p class="bp-note">On iPhone, tap Share, then Add to Home Screen. Open the portal from your Home Screen and turn on alerts there.</p>`;
+  if(s==='ios') return `<p class="bp-note">On iPhone, tap ${SHARE_ICON} Share in Safari, then <b>Add to Home Screen</b>. Open ${esc(brandName())} from your Home Screen and turn on alerts there. Needs iOS 16.4 or later.</p>`;
   if(s==='none') return '';
   return `<div class="bp-note"><span>Get an alert on this device for every update, even when the portal is in the background.</span><button class="btn sm primary" data-act="enablePush">Turn on alerts</button></div>`;
 }
@@ -553,7 +568,7 @@ const loaded = (...keys) => keys.every(k=>S.loaded[k]);
 
 /* ---------- auth ---------- */
 function startAuth(){
-  F.onSnapshot(tenantRef(), s=>{ S.tenant=s.exists()? s.data() : null; S.tenantErr=null; S.pub.tenant=true; schedRender(); }, e=>{ console.error('Company lookup failed', e); S.tenant=null; S.tenantErr=e?.code||'error'; S.pub.tenant=true; schedRender(); });
+  F.onSnapshot(tenantRef(), s=>{ S.tenant=s.exists()? s.data() : null; S.tenantErr=null; rememberCompany(S.tenant?.status==='active'); S.pub.tenant=true; schedRender(); }, e=>{ console.error('Company lookup failed', e); S.tenant=null; S.tenantErr=e?.code||'error'; S.pub.tenant=true; schedRender(); });
   // Public documents every portal needs before sign-in: who owns the portal, company branding, portal settings.
   F.onSnapshot(d('config','owner'), s=>{ OWNER_EXISTS=s.exists(); schedRender(); }, ()=>{ OWNER_EXISTS=true; schedRender(); });
   F.onSnapshot(d('config','portal'), s=>{ S.portal=s.exists()? s.data() : null; S.pub.portal=true; schedRender(); }, ()=>{ S.pub.portal=true; schedRender(); });
@@ -632,6 +647,9 @@ function saveShell(html){
   clearTimeout(shellT);
   shellT=setTimeout(()=>{ try{ if(html.length<400000) localStorage.setItem(`acsp-shell-${CO}-${PORTAL}`, html); }catch(e){} }, 1200);
 }
+// Remember this company so opening the site without a code (or the Home Screen app) comes straight back here.
+function rememberCompany(ok){ try{ if(ok) localStorage.setItem('acsp-co', CO); else if(localStorage.getItem('acsp-co')===CO) localStorage.removeItem('acsp-co'); }catch(e){} }
+const switchHref = () => `/${PORTAL_URL[PORTAL]}?switch=1`;
 function clearDeviceCopies(){ try{ Object.keys(localStorage).filter(k=>k.startsWith(`acsp-shell-${CO}-`)||k.startsWith(`acsp-me-${CO}-`)).forEach(k=>localStorage.removeItem(k)); }catch(e){} }
 function findCompanyView(){
   return `<div class="auth"><section class="auth-hero"><div class="brand" style="margin:0">${markSVG()}<div><b>AC Service Portal</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
@@ -647,11 +665,11 @@ const waiting = (html, keepShell=true) => { WAITING=keepShell; return html; };
 function view(){
   WAITING=false;
   if(!CONFIGURED) return setupView();
-  if(!CO) return findCompanyView();
+  if(!CO) return window.__REDIRECTING ? '' : findCompanyView();
   if(!S.pub.tenant) return waiting(`<div class="loading">Opening…</div>`);
   if(!S.tenant && S.tenantErr==='permission-denied') return gateView("The database blocked this page", `Firestore refused to read company <b>${esc(CO)}</b>. Publish the latest <b>firestore.rules</b> in Firebase console → Firestore Database → Rules, then reload.`);
   if(!S.tenant && S.tenantErr) return gateView("Couldn't reach the database", `Check your internet connection and reload. (${esc(S.tenantErr)})`);
-  if(!S.tenant) return gateView("We couldn't find this company", `There's no company with the code <b>${esc(CO)}</b>. Check the link you were sent.<br><br><span class="small muted">Setting this company up? Create it first on the <a href="/platform.html">platform admin page</a>.</span>`);
+  if(!S.tenant) return gateView("We couldn't find this company", `There's no company with the code <b>${esc(CO)}</b>. Check the link you were sent.<br><br><span class="small muted">Setting this company up? Create it first on the <a href="/platform.html">platform admin page</a>.</span><br><br><a class="btn block" href="${switchHref()}">Enter a different company code</a>`);
   if(S.tenant.status!=='active') return gateView(`${esc(S.tenant.name||'This service')} is unavailable`, 'This portal is paused for now. Please contact the company directly.');
   if(!S.pub.company || !S.pub.portal) return waiting(`<div class="loading">Opening the ${PORTAL_NAME[PORTAL].toLowerCase()}…</div>`);
   if(!ME.user) return authView();
@@ -672,7 +690,7 @@ function view(){
   if(UI.pendingJob && job(UI.pendingJob)){ openJobById(UI.pendingJob); UI.pendingJob=null; }
   if(UI.pendingChat && ME.role!=='customer'){ openChat(UI.pendingChat); UI.pendingChat=null; }
   const note = PORTAL==='customer'? PCFG().customerNotice : PORTAL==='technician'? PCFG().techNotice : '';
-  return header() + `<main class="wrap">${note?`<div class="notice"><b>${esc(co().name)}:</b> ${esc(note)}</div>`:''}${P.view()}</main>` + bellPanel() + modalView();
+  return header() + `<main class="wrap">${iosBanner()}${note?`<div class="notice"><b>${esc(co().name)}:</b> ${esc(note)}</div>`:''}${P.view()}</main>` + bellPanel() + modalView();
 }
 function markSVG(){ if(BRAND?.logo) return `<img class="mark logo" src="${esc(BRAND.logo)}" alt="">`; return `<svg class="mark" viewBox="0 0 38 38" aria-hidden="true"><rect class="u" x="3" y="6" width="32" height="16" rx="5"/><line class="l" x1="9" y1="17" x2="29" y2="17"/><path class="w" d="M10 27c2 2 2 4 0 6M19 27c2 2 2 4 0 6M28 27c2 2 2 4 0 6"/></svg>`; }
 function brandName(){ return S.company?.name || S.tenant?.name || 'AC Service Portal'; }
@@ -756,7 +774,7 @@ function authView(){
     <label class="field"><span>Password</span><input id="au-pass" name="password" type="password" autocomplete="current-password" required></label>
     <button class="btn primary block">Sign in</button>${google}
     <div class="row" style="justify-content:space-between">${PORTAL==='customer'? (cfg.customerSignup?`<button type="button" class="linkbtn" data-act="authMode" data-v="signup">Create an account</button>`:`<span class="small muted">New accounts are set up by the office${co().phone?' · '+esc(co().phone):''}</span>`) : PORTAL==='technician'?`<span class="small muted">Your login comes from the office.</span>`:'<span></span>'}<button type="button" class="linkbtn" data-act="authMode" data-v="reset">Forgot password?</button></div></form>`;
-  return `<div class="auth">${heroHTML}<section class="auth-form">${f}</section></div>`;
+  return `<div class="auth">${heroHTML}<section class="auth-form">${f}<p class="small muted" style="text-align:center;margin-top:14px">Not ${esc(brandName())}? <a href="${switchHref()}">Use a different company</a></p></section></div>`;
 }
 function profileExtraFields(kind){
   if(kind==='owner') return `<p class="small muted">Use the email address you gave the platform admin for <b>${esc(brandName())}</b>.</p>`;
@@ -846,10 +864,10 @@ function scheduleSec(j){
 }
 function quoteSec(j){
   const role=ME.role, Q=j.quote;
-  if(role==='technician' && (!Q || !PCFG().techSeePrices)) return '';
+  if(role==='technician') return '';   // technicians never see prices
   let h=`<div class="sec"><div class="sec-h"><h3>Quotation</h3>${Q?`<span class="pill ${Q.status==='accepted'?'teal':Q.status==='declined'?'bad':'orchid'}">${Q.status==='accepted'?'Accepted':Q.status==='declined'?'Declined':'Awaiting customer'}</span>`:''}</div>`;
   const editable=role==='provider' && !j.finishedAt && !j.cancelled && (!Q || Q.status!=='accepted');
-  if(Q) h+=docView('Quotation',Q,j);
+  if(Q) h+= role==='customer' ? docFold('Quotation',Q,j,Q.status==='sent') : docView('Quotation',Q,j);
   if(Q?.status==='declined' && Q.reason) h+=`<div class="callout coral"><span class="label">Customer's reason</span><p>${esc(Q.reason)}</p></div>`;
   if(role==='customer' && Q?.status==='sent') h+=`<div class="callout"><b>Do you approve this quotation?</b>
       <label class="field"><span>Message to the office (optional)</span><textarea id="qr-${j.id}" placeholder="Anything you want to change or ask"></textarea></label>
@@ -950,7 +968,7 @@ function techNext(j){
       <label class="field"><span>Parts or gas used (optional)</span><input id="wp-${j.id}" placeholder="e.g. 0.5 kg R32, 1 capacitor 35µF"></label>
       <div class="row"><button class="btn teal" data-act="finish" data-id="${j.id}">Mark job finished</button></div>`;
   } else if(s==='cancelled') h+=`<h3>This request was cancelled</h3>`;
-  else h+=`<h3>Job finished ${fdt(j.finishedAt)}</h3><p class="small">${j.payment?.status==='paid'?'Paid. Nothing left to do.':j.payment?.status==='pending'?'The customer will pay '+money(j.invoice.total)+' by '+METHODS[j.payment.method]?.n.toLowerCase()+'. Collect it and hand it to the office.':j.invoice?'Invoice sent to the customer.':'The office will send the invoice.'}</p>`;
+  else h+=`<h3>Job finished ${fdt(j.finishedAt)}</h3><p class="small">${j.payment?.status==='paid'?'Paid. Nothing left to do.':j.payment?.status==='pending'?'The customer will pay by '+METHODS[j.payment.method]?.n.toLowerCase()+'. Collect it and hand it to the office.':j.invoice?'Invoice raised. Waiting for the customer to pay.':'The office will raise the invoice.'}</p>`;
   return h+`</div></div>`;
 }
 
@@ -1086,9 +1104,21 @@ function workSec(j){
 }
 
 /* ---------- invoice & payment ---------- */
+// Technicians only see whether the invoice is raised and whether it's paid, never an amount.
+// Customers see the total and open the full document only if they want it.
+function docFold(kind, D, j, open){
+  return `<details class="doc-fold"${open?' open':''}><summary><span>${kind} <span class="mono">${esc(D.no||'')}</span><small>${open?'Tap to hide':'Tap to see the full '+kind.toLowerCase()}</small></span><b>${money(totals(D).total)}</b></summary>${docView(kind,D,j)}</details>`;
+}
+function techInvoiceSec(j){
+  const I=j.invoice, P=j.payment;
+  if(!I) return j.finishedAt? `<div class="sec"><div class="sec-h"><h3>Invoice</h3><span class="pill">Not raised yet</span></div><p class="small muted">The office raises the invoice after the job.</p></div>` : '';
+  const paid=P?.status==='paid';
+  return `<div class="sec"><div class="sec-h"><h3>Invoice</h3><span class="pill ${paid?'teal':P?.status==='pending'?'coral':'lagoon'}">${paid?'Paid':P?.status==='pending'?'To collect':'Invoice raised'}</span></div>
+    <p class="small">${paid?`Paid ${fdt(P.paidAt)}.`:P?.status==='pending'?`The customer will pay by ${esc(METHODS[P.method]?.n.toLowerCase()||'cash')} on site. Collect it and hand it to the office.`:`Invoice raised ${fdt(I.issuedAt)}. Waiting for the customer to pay.`}</p></div>`;
+}
 function invoiceSec(j){
   const role=ME.role, I=j.invoice, P=j.payment, C=co();
-  if(role==='technician' && !PCFG().techSeePrices) return I? `<div class="sec"><div class="sec-h"><h3>Invoice</h3>${pill(j)}</div></div>` : '';
+  if(role==='technician') return techInvoiceSec(j);
   if(!I && role!=='provider') return j.finishedAt? `<div class="sec"><h3>Invoice</h3><p class="muted">The invoice will appear here once the office sends it.</p></div>` : '';
   if(!I && !j.finishedAt) return '';
   let h=`<div class="sec"><div class="sec-h"><h3>Invoice</h3>${I?pill(j):''}</div>`;
@@ -1103,7 +1133,7 @@ function invoiceSec(j){
       <div class="row"><button class="btn primary" data-act="sendInvoice" data-id="${j.id}">Send invoice</button><span class="small muted">Sending posts the sale, GST and the amount owed to Accounting.</span></div></div>`;
     return h+`</div>`;
   }
-  h+=docView('Invoice',I,j);
+  h+= role==='customer' ? docFold('Invoice',I,j,false) : docView('Invoice',I,j);
   if(P?.status==='paid'){
     h+=`<div class="callout teal"><b>Paid ${money(P.amount)} by ${METHODS[P.method]?.n||P.method}</b><p class="small">${fdt(P.paidAt)}${P.ref?' · Reference '+esc(P.ref):''}</p>`;
     h+=receiptLine(j);
@@ -1155,8 +1185,9 @@ function ratingSec(j){
     <div class="row"><button class="btn mango" data-act="rate" data-id="${j.id}">Submit rating</button></div></div>`;
   return '';
 }
+const HAS_AMOUNT = t => new RegExp(`\\b${CUR}\\b|\\d[\\d,]*\\.\\d{2}\\b`).test(t||'');
 function messagesSec(j){
-  const ms=S.msgs[j.id]||[];
+  const ms=(S.msgs[j.id]||[]).filter(m=>!(ME.role==='technician' && m.kind==='sys' && HAS_AMOUNT(m.text)));
   return `<div class="sec"><h3>Activity and messages</h3>
     <div class="thread" data-keep-scroll="th-${j.id}">${ms.length? ms.map(m=>m.kind==='sys'?`<div class="sys">${esc(m.text)} · ${fdt(m.at)}</div>`
       :`<div class="msg r-${esc(m.role)} ${m.uid===ME.user.uid?'mine':''}"><span class="who">${esc(m.name)} · ${m.role==='provider'?'Office':m.role==='technician'?'Technician':'Customer'} · ${fdt(m.at)}</span><p>${esc(m.text)}</p></div>`).join('') : '<p class="muted small">No messages yet.</p>'}</div>
@@ -1198,10 +1229,13 @@ const ACT = {
         at, read:false, from:ME.user.uid, fromName:name, portal:ME.role==='provider'?'technician':'admin'}).catch(e=>console.warn('chat notify',e));
     }); },
   readAll(){ const b=F.writeBatch(db); (S.inbox||[]).filter(x=>!x.read).forEach(x=>b.update(d('inbox',inboxId(),'items',x.id),{read:true})); b.commit().catch(e=>toast(errMsg(e))); },
+  iosHide(){ try{ localStorage.setItem('acsp-ios-hide', CO); }catch(e){} render(); },
   async enablePush(){
     if(window.AndroidApp?.requestPushToken){ pushTried=null; window.AndroidApp.requestPushToken(); toast('Allow notifications when your phone asks'); setTimeout(render, 1500); return; }
-    try{ const p=await Notification.requestPermission(); if(p!=='granted'){ toast('Alerts were not allowed on this device.'); return render(); }
-      await registerSW(); pushTried=null; await registerPush(); toast('Alerts are on for this device'); render(); }
+    try{ const p=await Notification.requestPermission(); if(p!=='granted'){ toast(IS_IOS?'Notifications were not allowed. Turn them on in Settings → Notifications → '+brandName()+'.':'Alerts were not allowed on this device.'); return render(); }
+      await registerSW(); pushTried=null; await registerPush();
+      if(IS_IOS && !PUSH_TOKEN) toast(SETTINGS.vapidKey?"Notifications are allowed, but this iPhone couldn't register for them. Close the app fully, open it again and retry.":"Notifications are allowed, but push isn't set up for this site yet (vapidKey in firebase-config.js).");
+      else toast('Alerts are on for this device'); render(); }
     catch(e){ toast('This browser cannot show alerts.'); } },
   async copy(el){ const v=el.dataset.v; try{ await navigator.clipboard.writeText(v); toast('Copied: '+v); }catch(e){ toast(v); } },
   rcptRemove(el){ delete UI.rcpt[el.dataset.id]; render(); },
@@ -1314,20 +1348,23 @@ const ACT = {
         UI._lastInv=inv;
       });
       await event(j,`Invoice ${UI._lastInv.no}: ${money(UI._lastInv.total)}, due ${fd(UI._lastInv.dueDate)}`,['customer'],'Your invoice is ready'); delete UI.ed[key];
+      await notify(j,['tech'],'Invoice raised',`${j.no} · Invoice raised for ${j.customerName||'the customer'}`);
     }, 'Invoice sent and posted to accounts').finally(()=>el.disabled=false); },
 
   pay(el){ const j=job(el.dataset.id), m=el.dataset.m, I=j.invoice, r=UI.rcpt[j.id], at=nowISO();
     const withReceipt = b => { if(!r) return {}; b.set(d('jobs',j.id,'files','receipt'),{...r, at, uid:ME.user.uid}); return {receipt:{name:r.name, type:r.type, at}}; };
     if(!METHODS[m].transfer) return run(async()=>{ const b=F.writeBatch(db); const extra=withReceipt(b);
       b.update(jobRef(j.id),{payment:{method:m,status:'pending',amount:I.total,requestedAt:at}, ...extra}); await b.commit(); delete UI.rcpt[j.id];
-      await event(j,`Customer will pay ${money(I.total)} by ${METHODS[m].n.toLowerCase()} on site`,['office','tech'],'Payment to collect'); }, 'Noted. Pay the technician or the office.');
+      await event(j,`Customer will pay ${money(I.total)} by ${METHODS[m].n.toLowerCase()} on site`,['office'],'Payment to collect');
+      await notify(j,['tech'],'Payment to collect',`${j.no} · The customer will pay by ${METHODS[m].n.toLowerCase()} on site. Collect it and hand it to the office.`); }, 'Noted. Pay the technician or the office.');
     const ref=val('pr-'+j.id); if(!ref && !r) return toast('Enter the bank reference or upload the receipt.');
     el.disabled=true;
     run(async()=>{ const b=F.writeBatch(db); const extra=withReceipt(b);
       b.update(jobRef(j.id),{payment:{method:m,ref,amount:I.total,status:'paid',verified:false,paidAt:at}, ...extra});
       b.set(d('ledger','pay-'+j.id), payEntry(j,m,ref||'receipt uploaded'));
       await b.commit(); delete UI.rcpt[j.id];
-      await event(j,`${money(I.total)} paid by ${METHODS[m].n}${ref?' · Ref '+ref:''}${r?' · receipt attached':''}. Please verify.`,['office'],'Payment received'); }, 'Payment details sent. Thank you!').finally(()=>el.disabled=false); },
+      await event(j,`${money(I.total)} paid by ${METHODS[m].n}${ref?' · Ref '+ref:''}${r?' · receipt attached':''}. Please verify.`,['office'],'Payment received');
+      await notify(j,['tech'],'Job paid',`${j.no} · The customer has paid.`); }, 'Payment details sent. Thank you!').finally(()=>el.disabled=false); },
   confirmPay(el){ const j=job(el.dataset.id); settle(j, j.payment.method, j.payment.ref||'', 'Payment recorded'); },
   recordPay(el){ const j=job(el.dataset.id); settle(j, val('rp-m-'+j.id)||'cash', val('rp-r-'+j.id), 'Payment recorded'); },
   verifyPay(el){ const j=job(el.dataset.id); run(async()=>{ await F.updateDoc(jobRef(j.id),{'payment.verified':true}); await event(j,`Your payment of ${money(j.payment.amount)} is confirmed. Thank you!`,['customer'],'Payment confirmed'); }, 'Marked as received'); },
@@ -1351,7 +1388,8 @@ function settle(j, method, ref, okText){
   run(async()=>{ const b=F.writeBatch(db);
     b.update(jobRef(j.id),{payment:{method,ref:ref||'',amount:j.invoice.total,status:'paid',verified:true,paidAt:nowISO()}});
     b.set(d('ledger','pay-'+j.id), payEntry(j,method,ref));
-    await b.commit(); await event(j,`Payment of ${money(j.invoice.total)} received by ${METHODS[method]?.n||method}. Thank you!`,['customer'],'Payment confirmed'); }, okText);
+    await b.commit(); await event(j,`Payment of ${money(j.invoice.total)} received by ${METHODS[method]?.n||method}. Thank you!`,['customer'],'Payment confirmed');
+    if(j.payment?.status!=='paid') await notify(j,['tech'],'Job paid',`${j.no} · Paid by ${(METHODS[method]?.n||method).toLowerCase()}.`); }, okText);
 }
 const FORMS = {
   async signin(f,dd){ await run(()=>A.signInWithEmailAndPassword(auth, dd.email, dd.password)); },
