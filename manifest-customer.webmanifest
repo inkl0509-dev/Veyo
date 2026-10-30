@@ -2,24 +2,24 @@
   "name": "AC Service \u00b7 Customer Portal",
   "short_name": "AC Service",
   "description": "Book AC service, track your technician and pay.",
-  "start_url": "index.html",
-  "scope": "./",
+  "start_url": "/index.html",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#F1F6FA",
   "theme_color": "#0077B6",
   "icons": [
     {
-      "src": "assets/icon-192.png",
+      "src": "/assets/icon-192.png",
       "sizes": "192x192",
       "type": "image/png"
     },
     {
-      "src": "assets/icon-512.png",
+      "src": "/assets/icon-512.png",
       "sizes": "512x512",
       "type": "image/png"
     },
     {
-      "src": "assets/icon-512.png",
+      "src": "/assets/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
