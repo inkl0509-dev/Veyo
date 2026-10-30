@@ -14,17 +14,40 @@ const PORTAL = document.body.dataset.portal || 'customer';            // custome
 const ROLE_OF = {customer:'customer', technician:'technician', admin:'provider'};
 const PORTAL_ROLE = ROLE_OF[PORTAL];
 const PORTAL_URL = {customer:'index.html', technician:'tech.html', admin:'admin.html'};
+// Running inside the Android app (it adds a JavaScript bridge called AndroidApp).
+const IN_APP = !!window.AndroidApp || /ACServiceApp/.test(navigator.userAgent);
+/* ---------- which company ----------
+   Each company has its own code, used in the address: /reefside (customers), /reefside/tech, /reefside/admin.
+   ?c=reefside also works (handy for local testing). All of the company's data lives under tenants/{code}. */
+const RESERVED = ['tech','admin','platform','assets','css','js','functions','index','sw','api','www'];
+const CO = (()=>{
+  const q=(new URLSearchParams(location.search).get('c')||'').toLowerCase();
+  if(q) return q;
+  const seg=(location.pathname.split('/').filter(Boolean)[0]||'').toLowerCase();
+  return seg && !seg.includes('.') && !RESERVED.includes(seg) ? seg : '';
+})();
+const PATH_MODE = !!CO && !new URLSearchParams(location.search).get('c');
+/** Link to a portal of this company, optionally with ?job=… or ?chat=… */
+function portalHref(p, params){
+  const q=new URLSearchParams(params||{});
+  if(PATH_MODE) return `/${CO}${{customer:'',technician:'/tech',admin:'/admin'}[p]}${q.toString()?'?'+q:''}`;
+  q.set('c', CO); return `/${PORTAL_URL[p]}?${q}`;
+}
 const PORTAL_NAME = {customer:'Customer portal', technician:'Technician portal', admin:'Admin portal'};
-const portalLink = p => new URL(PORTAL_URL[p], location.href).href.replace(/index\.html$/, '');
+const portalLink = p => new URL(portalHref(p), location.href).href;
 
 let A, F, appMod, auth, db, fbApp;
 if (CONFIGURED) {
   const [app, authMod, fsMod] = await Promise.all([import(FB + 'firebase-app.js'), import(FB + 'firebase-auth.js'), import(FB + 'firebase-firestore.js')]);
   appMod = app; A = authMod; F = fsMod;
   // A separately named Firebase app per portal keeps each portal's sign-in separate in the same browser.
-  fbApp = app.initializeApp(firebaseConfig, 'portal-' + PORTAL);
+  // A separate Firebase app per company and portal keeps every sign-in separate, even in the same browser.
+  fbApp = app.initializeApp(firebaseConfig, `portal-${CO||'none'}-${PORTAL}`);
   auth = A.getAuth(fbApp);
-  db = F.initializeFirestore(fbApp, {ignoreUndefinedProperties:true});
+  // Keep a copy of this company's data on the device, so the next visit shows it straight away
+  // while fresh data loads in the background. Falls back to memory where the browser can't (private mode).
+  try{ db = F.initializeFirestore(fbApp, {ignoreUndefinedProperties:true, localCache:F.persistentLocalCache({tabManager:F.persistentMultipleTabManager()})}); }
+  catch(e){ db = F.initializeFirestore(fbApp, {ignoreUndefinedProperties:true}); }
 }
 /* ---------- constants ---------- */
 const TZ = SETTINGS.timeZone || 'Indian/Maldives';
@@ -62,10 +85,10 @@ const S = {company:null, portal:null, services:[], techs:[], customers:[], users
 const ME = {user:null, profile:null, profileLoaded:false, role:null};
 let OWNER_EXISTS = null;
 let UI = loadUI();
-function loadUI(){ let u={}; try{ u=JSON.parse(localStorage.getItem('acsp-ui-'+PORTAL)||'{}'); }catch(e){}
+function loadUI(){ let u={}; try{ u=JSON.parse(localStorage.getItem(`acsp-ui-${CO}-${PORTAL}`)||'{}'); }catch(e){}
   return Object.assign({ptab:'jobs',ctab:'home',filter:'action',period:'month'}, u,
     {q:'',sel:'',ed:{},confirm:'',busy:'',pick:{},authMode:'signin',creating:false,payM:{},rcpt:{},bell:false,modal:null,bk:null}); }
-function saveUI(){ try{ const {ptab,ctab,filter,period}=UI; localStorage.setItem('acsp-ui-'+PORTAL,JSON.stringify({ptab,ctab,filter,period})); }catch(e){} }
+function saveUI(){ try{ const {ptab,ctab,filter,period}=UI; localStorage.setItem(`acsp-ui-${CO}-${PORTAL}`,JSON.stringify({ptab,ctab,filter,period})); }catch(e){} }
 // Settings the admin controls for the customer and technician portals.
 const PCFG = () => {
   const p = S.portal || {};
@@ -97,12 +120,12 @@ function brandPalette(b){
     theme:heroA
   };
 }
-let BRAND = (()=>{ try{ return JSON.parse(localStorage.getItem('acsp-brand')||'null'); }catch(e){ return null; } })();
+let BRAND = (()=>{ try{ return JSON.parse(localStorage.getItem('acsp-brand-'+CO)||'null'); }catch(e){ return null; } })();
 function applyBrand(b){
   BRAND=b||null;
-  try{ b? localStorage.setItem('acsp-brand', JSON.stringify(b)) : localStorage.removeItem('acsp-brand'); }catch(e){}
+  try{ b? localStorage.setItem('acsp-brand-'+CO, JSON.stringify(b)) : localStorage.removeItem('acsp-brand-'+CO); }catch(e){}
   let st=document.getElementById('brand-vars');
-  if(!b || !b.color){ st?.remove(); document.body.removeAttribute('data-brand'); updateIcons(); return; }
+  if(!b || !b.color){ st?.remove(); document.body.removeAttribute('data-brand'); try{ localStorage.removeItem('acsp-brandcss-'+CO); }catch(e){} updateIcons(); return; }
   const p=brandPalette(b), decl=o=>Object.entries(o).map(([k,v])=>`${k}:${v}`).join(';');
   if(!st){ st=document.createElement('style'); st.id='brand-vars'; document.head.appendChild(st); }
   st.textContent=`body[data-portal][data-brand]{${decl(p.light)}}
@@ -110,6 +133,8 @@ function applyBrand(b){
 :root[data-theme="dark"] body[data-portal][data-brand]{${decl(p.dark)}}`;
   document.body.setAttribute('data-brand','');
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', p.theme);
+  try{ localStorage.setItem('acsp-brandcss-'+CO, st.textContent); }catch(e){}
+  try{ window.AndroidApp?.setStatusBarColor?.(p.theme); }catch(e){}
   updateIcons();
 }
 // The default mark, in the brand colours, for companies without a logo.
@@ -141,7 +166,7 @@ function updateIcons(){
       setLink('icon', i192, {type:'image/png'}); setLink('apple-touch-icon', i192);
       // Home-screen app: name, colours and icon of this company.
       const nm=S.company?.name || 'AC Service';
-      const man={name:`${nm} · ${PORTAL_NAME[PORTAL]}`, short_name:nm.length>14? nm.slice(0,14) : nm, start_url:new URL(PORTAL_URL[PORTAL],location.href).href, scope:new URL('./',location.href).href,
+      const man={name:`${nm} · ${PORTAL_NAME[PORTAL]}`, short_name:nm.length>14? nm.slice(0,14) : nm, start_url:new URL(portalHref(PORTAL),location.href).href, scope:new URL(PATH_MODE?`/${CO}/`:'/',location.href).href, id:`${CO}-${PORTAL}`,
         display:'standalone', background_color:'#FFFFFF', theme_color:BRAND.color? brandPalette(BRAND).theme : '#0077B6',
         icons:[{src:i192,sizes:'192x192',type:'image/png'},{src:i512,sizes:'512x512',type:'image/png'},{src:i512,sizes:'512x512',type:'image/png',purpose:'maskable'}]};
       setLink('manifest', URL.createObjectURL(new Blob([JSON.stringify(man)],{type:'application/manifest+json'})));
@@ -263,8 +288,10 @@ function errMsg(e){
 }
 async function run(fn, okText){ try{ await fn(); if(okText) toast(okText); return true; }catch(e){ console.error(e); toast(errMsg(e)); return false; } }
 /* ---------- firestore refs ---------- */
-const d = (...p) => F.doc(db, ...p);
-const c = (...p) => F.collection(db, ...p);
+// Every read and write goes to this company's own space in the database.
+const d = (...p) => F.doc(db, 'tenants', CO, ...p);
+const c = (...p) => F.collection(db, 'tenants', CO, ...p);
+const tenantRef = () => F.doc(db, 'tenants', CO);
 const snapList = s => s.docs.map(x=>({...x.data(), id:x.id}));
 function sys(text){ return {kind:'sys', text, at:nowISO(), uid:ME.user.uid, role:ME.role, name:myName()}; }
 function msgObj(text){ return {kind:'msg', text, at:nowISO(), uid:ME.user.uid, role:ME.role, name:myName()}; }
@@ -307,14 +334,17 @@ async function notifyTo(j, rids, title, body){
 /** Record a step in the job's activity log and notify the other parties. */
 async function event(j, text, parties, title){ await log(j.id, text); await notify(j, parties, title, `${j.no?j.no+' · ':''}${text}`); }
 const unread = () => (S.inbox||[]).filter(x=>!x.read).length;
-function itemUrl(it){ return new URL(PORTAL_URL[it.portal||PORTAL] + (it.chat ? '?chat='+encodeURIComponent(it.chat) : it.jobId ? '?job='+encodeURIComponent(it.jobId) : ''), location.href).href; }
-function pushState(){ if(!('Notification' in window)) return /iPhone|iPad|iPod/.test(navigator.userAgent) ? 'ios' : 'none'; return Notification.permission; }
+function itemUrl(it){ return new URL(portalHref(it.portal||PORTAL, it.chat ? {chat:it.chat} : it.jobId ? {job:it.jobId} : {}), location.href).href; }
+function pushState(){
+  if(window.AndroidApp?.notificationsEnabled) return window.AndroidApp.notificationsEnabled() ? 'granted' : 'default';
+  if(!('Notification' in window)) return /iPhone|iPad|iPod/.test(navigator.userAgent) ? 'ios' : 'none'; return Notification.permission; }
 async function alertItem(it){
   // A chat message for the conversation already on screen needs no alert.
   if(it.chat && openChatId()===it.chat && !document.hidden){ F.updateDoc(d('inbox',inboxId(),'items',it.id),{read:true}).catch(()=>{}); return; }
   if(!document.hidden){ toast(`${it.title}: ${it.body}`); return; }
+  if(IN_APP) return;   // the Android app shows its own phone notifications
   if(pushState()!=='granted') return;
-  const opts={body:it.body, tag:it.id, icon:'assets/icon-192.png', badge:'assets/icon-192.png', data:{url:itemUrl(it)}};
+  const opts={body:it.body, tag:it.id, icon:'/assets/icon-192.png', badge:'/assets/icon-192.png', data:{url:itemUrl(it)}};
   try{ const reg=SW_REG || await navigator.serviceWorker?.getRegistration(); if(reg){ await reg.showNotification(it.title, opts); return; } }catch(e){}
   try{ const n=new Notification(it.title, opts); n.onclick=()=>{ window.focus(); it.chat ? openChat(it.chat) : openJobById(it.jobId); render(); }; }catch(e){}
 }
@@ -379,11 +409,20 @@ let SW_REG=null, PUSH_TOKEN=null, pushTried=null;
 async function registerSW(){
   if(!('serviceWorker' in navigator) || !CONFIGURED) return null;
   const q = SETTINGS.vapidKey ? '?'+new URLSearchParams({apiKey:firebaseConfig.apiKey, projectId:firebaseConfig.projectId, messagingSenderId:firebaseConfig.messagingSenderId||'', appId:firebaseConfig.appId||''}) : '';
-  try{ SW_REG = await navigator.serviceWorker.register('sw.js'+q); }catch(e){ console.warn('service worker', e); }
+  try{ SW_REG = await navigator.serviceWorker.register('/sw.js'+q, {scope:'/'}); }catch(e){ console.warn('service worker', e); }
   return SW_REG;
 }
 // Push while every portal is closed needs a VAPID key in firebase-config.js and the Cloud Function in /functions.
+// In the Android app: the app gets a push token from Firebase and hands it to the page, which saves it
+// on the account so the push function can reach this phone.
+window.__nativePushToken = async token => {
+  if(!token || !ME.user) return;
+  PUSH_TOKEN=token;
+  if(!(ME.profile?.fcmTokens||[]).includes(token)) try{ await F.updateDoc(d('users',ME.user.uid), {fcmTokens:F.arrayUnion(token)}); }catch(e){ console.warn('push token', e); }
+  schedRender();
+};
 async function registerPush(){
+  if(window.AndroidApp?.requestPushToken){ if(ME.user && pushTried!==ME.user.uid){ pushTried=ME.user.uid; try{ window.AndroidApp.requestPushToken(); }catch(e){} } return; }
   if(!SETTINGS.vapidKey || !ME.user || pushState()!=='granted' || pushTried===ME.user.uid) return;
   pushTried=ME.user.uid;
   try{
@@ -507,10 +546,14 @@ function syncMsgSub(){
   if(!id) return;
   msgSub.un = F.onSnapshot(F.query(c('jobs',id,'messages'), F.orderBy('at')), s=>{ S.msgs[id]=snapList(s); schedRender(); }, e=>console.warn('messages',e));
 }
-function ready(){ return S.pub.company && S.pub.portal && S.need.length && S.need.every(k=>S.loaded[k]); }
+// The first screen only waits for what it shows; everything else fills in as it arrives.
+const FIRST_SCREEN = {provider:['jobs'], customer:['customers','jobs'], technician:['jobs']};
+function ready(){ return S.pub.company && S.pub.portal && ME.role && (FIRST_SCREEN[ME.role]||[]).every(k=>S.loaded[k]); }
+const loaded = (...keys) => keys.every(k=>S.loaded[k]);
 
 /* ---------- auth ---------- */
 function startAuth(){
+  F.onSnapshot(tenantRef(), s=>{ S.tenant=s.exists()? s.data() : null; S.pub.tenant=true; schedRender(); }, ()=>{ S.tenant=null; S.pub.tenant=true; schedRender(); });
   // Public documents every portal needs before sign-in: who owns the portal, company branding, portal settings.
   F.onSnapshot(d('config','owner'), s=>{ OWNER_EXISTS=s.exists(); schedRender(); }, ()=>{ OWNER_EXISTS=true; schedRender(); });
   F.onSnapshot(d('config','portal'), s=>{ S.portal=s.exists()? s.data() : null; S.pub.portal=true; schedRender(); }, ()=>{ S.pub.portal=true; schedRender(); });
@@ -522,8 +565,13 @@ function startAuth(){
     stopSubs(); stopGPS();
     ME.user=user; ME.profile=null; ME.role=null; ME.profileLoaded=false; UI.sel='';
     if(user){
+      // Start straight away with the profile remembered on this device; the live profile corrects it if it changed.
+      const key=`acsp-me-${CO}-${user.uid}`;
+      try{ const cached=JSON.parse(localStorage.getItem(key)||'null');
+        if(cached && cached.role===PORTAL_ROLE && (cached.status||'active')==='active'){ ME.profile=cached; ME.profileLoaded=true; ME.role=cached.role; startSubs(); } }catch(e){}
       profUn = F.onSnapshot(d('users',user.uid), s=>{
         ME.profile = s.exists()? s.data() : null; ME.profileLoaded=true;
+        try{ ME.profile ? localStorage.setItem(key, JSON.stringify({name:ME.profile.name||'', role:ME.profile.role, status:ME.profile.status||'active', phone:ME.profile.phone||'', email:ME.profile.email||''})) : localStorage.removeItem(key); }catch(e){}
         const ok = ME.profile && ME.profile.role===PORTAL_ROLE && (ME.profile.status||'active')==='active';
         const role = ok ? ME.profile.role : null;
         if(role!==ME.role){ ME.role=role; UI.sel=''; if(role) startSubs(); else stopSubs(); }
@@ -544,7 +592,7 @@ async function createProfile(dd, kind){
     b.set(d('customers',u.uid), {name:dd.name, phone:dd.phone||'', email:base.email, island:dd.island||'', address:dd.address||'', hasLogin:true, createdAt:nowISO()});
   }
   await b.commit();
-  if(kind==='owner') await F.setDoc(d('company','profile'), {...co(), name:dd.company||'Your AC company', phone:dd.phone||'', email:base.email});
+  if(kind==='owner') await F.setDoc(d('company','profile'), {phone:dd.phone||'', email:base.email}, {merge:true});
 }
 // The admin creates sign-in accounts for technicians, office staff and phone customers.
 // A temporary second Firebase app is used so the admin stays signed in.
@@ -564,7 +612,10 @@ function render(){
   const ae=document.activeElement;
   if(ae && ae.id && app.contains(ae)){ focus={id:ae.id}; try{ focus.s=ae.selectionStart; focus.e=ae.selectionEnd; }catch(e){} }
   const scrolls={}; app.querySelectorAll('[data-keep-scroll]').forEach(el=>scrolls[el.dataset.keepScroll]=[el.scrollTop, el.scrollHeight-el.scrollTop-el.clientHeight<8]);
-  app.innerHTML = view();
+  const html = view();
+  if(WAITING && app.classList.contains('shell') && Date.now()-BOOT < 15000) return;
+  app.innerHTML = html; app.classList.remove('shell');
+  saveShell(html);
   for(const id in saved){ const el=document.getElementById(id); if(!el || el.dataset.np!==undefined) continue;
     if(el.type==='checkbox'||el.type==='radio') el.checked=saved[id].c; else if(el.type!=='file') el.value=saved[id].v; }
   app.querySelectorAll('[data-keep-scroll]').forEach(el=>{ const k=el.dataset.keepScroll, v=scrolls[k]; el.scrollTop = (!v || v[1]) ? el.scrollHeight : v[0]; });
@@ -574,14 +625,37 @@ function render(){
   ensureGPS();
 }
 
+// Remember the last full screen so the next visit can show it instantly while loading.
+let shellT; const BOOT=Date.now();
+function saveShell(html){
+  if(!ME.role || !ready() || UI.bell || UI.modal) return;
+  clearTimeout(shellT);
+  shellT=setTimeout(()=>{ try{ if(html.length<400000) localStorage.setItem(`acsp-shell-${CO}-${PORTAL}`, html); }catch(e){} }, 1200);
+}
+function clearDeviceCopies(){ try{ Object.keys(localStorage).filter(k=>k.startsWith(`acsp-shell-${CO}-`)||k.startsWith(`acsp-me-${CO}-`)).forEach(k=>localStorage.removeItem(k)); }catch(e){} }
+function findCompanyView(){
+  return `<div class="auth"><section class="auth-hero"><div class="brand" style="margin:0">${markSVG()}<div><b>AC Service Portal</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
+    <h1>Which company are you with?</h1><p>Each service company has its own address. Use the link your company sent you, or enter its company code.</p></section>
+    <section class="auth-form"><form class="auth-card" data-form="findCompany"><h2>Find your company</h2>
+      <label class="field"><span>Company code</span><input id="fc-code" name="code" placeholder="e.g. reefside" autocapitalize="none" autocomplete="off" required></label>
+      <button class="btn primary block">Continue</button></form></section></div>`;
+}
+// While the portal is still loading, the instant screen from the last visit stays up instead of a spinner.
+let WAITING=false;
+const waiting = (html, keepShell=true) => { WAITING=keepShell; return html; };
 function view(){
+  WAITING=false;
   if(!CONFIGURED) return setupView();
-  if(!S.pub.company || !S.pub.portal) return `<div class="loading">Opening the ${PORTAL_NAME[PORTAL].toLowerCase()}…</div>`;
+  if(!CO) return findCompanyView();
+  if(!S.pub.tenant) return waiting(`<div class="loading">Opening…</div>`);
+  if(!S.tenant) return gateView("We couldn't find this company", `There's no company with the code <b>${esc(CO)}</b>. Check the link you were sent.`);
+  if(S.tenant.status!=='active') return gateView(`${esc(S.tenant.name||'This service')} is unavailable`, 'This portal is paused for now. Please contact the company directly.');
+  if(!S.pub.company || !S.pub.portal) return waiting(`<div class="loading">Opening the ${PORTAL_NAME[PORTAL].toLowerCase()}…</div>`);
   if(!ME.user) return authView();
-  if(!ME.profileLoaded || UI.creating) return `<div class="loading">Setting up your account…</div>`;
+  if(!ME.profileLoaded || UI.creating) return waiting(`<div class="loading">Setting up your account…</div>`, !UI.creating);
   if(!ME.profile){
     if(PORTAL==='customer') return completeProfileView('customer');
-    if(PORTAL==='admin' && OWNER_EXISTS===false) return completeProfileView('owner');
+    if(PORTAL==='admin' && OWNER_EXISTS===false) return ME.user.emailVerified ? completeProfileView('owner') : verifyEmailView();
     return gateView('No account here yet', PORTAL==='technician'
       ? 'Technician accounts are created by the office. Ask them to set one up for this email.'
       : 'This portal is for the service office only.');
@@ -591,26 +665,34 @@ function view(){
     return gateView(`This is the ${PORTAL_NAME[PORTAL].toLowerCase()}`, `Your account is ${right==='admin'?'an office':'a '+right} account. Use the ${PORTAL_NAME[right].toLowerCase()} instead.`, right);
   }
   if((ME.profile.status||'active')!=='active') return gateView('Your account is paused', `Please contact ${esc(co().name)}${co().phone?' on '+esc(co().phone):''}.`);
-  if(!ready()) return header()+`<div class="loading">Loading…</div>`;
+  if(!ready()) return waiting(header()+`<div class="loading">Loading…</div>`);
   if(UI.pendingJob && job(UI.pendingJob)){ openJobById(UI.pendingJob); UI.pendingJob=null; }
   if(UI.pendingChat && ME.role!=='customer'){ openChat(UI.pendingChat); UI.pendingChat=null; }
   const note = PORTAL==='customer'? PCFG().customerNotice : PORTAL==='technician'? PCFG().techNotice : '';
   return header() + `<main class="wrap">${note?`<div class="notice"><b>${esc(co().name)}:</b> ${esc(note)}</div>`:''}${P.view()}</main>` + bellPanel() + modalView();
 }
 function markSVG(){ if(BRAND?.logo) return `<img class="mark logo" src="${esc(BRAND.logo)}" alt="">`; return `<svg class="mark" viewBox="0 0 38 38" aria-hidden="true"><rect class="u" x="3" y="6" width="32" height="16" rx="5"/><line class="l" x1="9" y1="17" x2="29" y2="17"/><path class="w" d="M10 27c2 2 2 4 0 6M19 27c2 2 2 4 0 6M28 27c2 2 2 4 0 6"/></svg>`; }
-function brandName(){ return S.company?.name || 'AC Service Portal'; }
+function brandName(){ return S.company?.name || S.tenant?.name || 'AC Service Portal'; }
+// The owner must prove they own the email the platform admin entered before claiming the company.
+function verifyEmailView(){
+  return `<div class="auth"><section class="auth-hero"><div class="brand" style="margin:0">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div><h1>Verify your email</h1><p>This keeps anyone else from taking over your company.</p></section>
+    <section class="auth-form"><div class="auth-card"><p>We sent a link to <b>${esc(ME.user.email||'')}</b>. Open it, then come back and tap Continue.</p>
+      <button class="btn primary block" data-act="verifiedContinue">I've verified my email: continue</button>
+      <button class="btn block" data-act="verifySend">Send the link again</button>
+      <button class="linkbtn" data-act="signOut">Use a different account</button></div></section></div>`;
+}
 function header(){
   return `<header class="top"><div class="top-in">
     <div class="brand">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
-    ${PORTAL==='admin'?`<nav class="portal-links"><a href="${PORTAL_URL.customer}" target="_blank" rel="noopener">Customer portal ↗</a><a href="${PORTAL_URL.technician}" target="_blank" rel="noopener">Technician portal ↗</a></nav>`:''}
+    ${PORTAL==='admin'?`<nav class="portal-links"><a href="${portalHref('customer')}" target="_blank" rel="noopener">Customer portal ↗</a><a href="${portalHref('technician')}" target="_blank" rel="noopener">Technician portal ↗</a></nav>`:''}
     <div class="me">${bellButton()}<span class="avatar">${esc(initials(ME.profile?.name))}</span><div class="me-txt"><div style="font-weight:700;line-height:1.2">${esc(ME.profile?.name||'')}</div><span class="role-badge ${ME.role}">${ME.role==='provider'?'Office':ME.role==='technician'?'Technician':'Customer'}</span></div>
-    <button class="btn sm signout" data-act="signOut">Sign out</button></div>
+    ${IN_APP?'<a class="btn sm" href="/app.html?switch=1">Switch</a>':''}<button class="btn sm signout" data-act="signOut">Sign out</button></div>
   </div></header>`;
 }
 function gateView(title, text, linkTo){
   return `<div class="auth"><section class="auth-hero"><div class="brand" style="margin:0">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div><h1>${esc(title)}</h1></section>
-    <section class="auth-form"><div class="auth-card"><p>${text}</p>${linkTo?`<a class="btn primary block" href="${PORTAL_URL[linkTo]}">Open the ${PORTAL_NAME[linkTo].toLowerCase()}</a>`:''}
-    <button class="btn block" data-act="signOut">Sign out</button></div></section></div>`;
+    <section class="auth-form"><div class="auth-card"><p>${text}</p>${linkTo?`<a class="btn primary block" href="${portalHref(linkTo)}">Open the ${PORTAL_NAME[linkTo].toLowerCase()}</a>`:''}
+    ${ME.user?'<button class="btn block" data-act="signOut">Sign out</button>':''}</div></section></div>`;
 }
 function setupView(){
   if(CONFIG_ERROR) return `<div class="setup stack"><h1>There's a mistake in firebase-config.js</h1>
@@ -651,7 +733,7 @@ function authView(){
   const heroHTML=`<section class="auth-hero"><div class="brand" style="margin:0">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
     <h1>${hero.h}</h1><ul>${hero.items.map((t,i)=>`<li><i>${i+1}</i><span>${t}</span></li>`).join('')}</ul></section>`;
   const canSignup = (PORTAL==='customer' && cfg.customerSignup) || (PORTAL==='admin' && OWNER_EXISTS===false);
-  const google = PORTAL!=='technician' ? `<div class="or">or</div><button type="button" class="btn block" data-act="google">Continue with Google</button>` : '';
+  const google = PORTAL!=='technician' && !IN_APP ? `<div class="or">or</div><button type="button" class="btn block" data-act="google">Continue with Google</button>` : '';
   let f='';
   if(m==='reset') f=`<form class="auth-card" data-form="reset"><h2>Reset your password</h2><p class="muted">We'll email you a link to choose a new password.</p>
     <label class="field"><span>Email</span><input id="au-email" name="email" type="email" autocomplete="email" required></label>
@@ -674,7 +756,7 @@ function authView(){
   return `<div class="auth">${heroHTML}<section class="auth-form">${f}</section></div>`;
 }
 function profileExtraFields(kind){
-  if(kind==='owner') return `<label class="field"><span>Company name</span><input id="au-company" name="company" placeholder="e.g. Reefside Aircon Services" required></label>`;
+  if(kind==='owner') return `<p class="small muted">Use the email address you gave the platform admin for <b>${esc(brandName())}</b>.</p>`;
   return `<div class="grid2"><label class="field"><span>Island / city</span><input id="au-island" name="island" placeholder="Malé, Hulhumalé, Thulusdhoo…"></label>
     <label class="field"><span>Address</span><input id="au-address" name="address" placeholder="House, road, floor"></label></div>`;
 }
@@ -848,7 +930,7 @@ function techNext(j){
   } else if(['assigned','scheduled','quoted','approved'].includes(s) && other && other.id!==j.id){
     h+=`<h3>You're still on the way to ${esc(other.no)}</h3><p class="small">Tap "I've arrived" on that job before starting this trip.</p>`;
   } else if(['assigned','scheduled','quoted','approved'].includes(s)){
-    h+=`<h3>Leaving for this job?</h3><p class="small">Starting the trip shares your phone's location with the customer and the office until you arrive. Keep this page open while you travel.</p>
+    h+=`<h3>Leaving for this job?</h3><p class="small">Starting the trip shares your phone's location with the customer and the office until you arrive. ${IN_APP?'You can lock your phone while you drive.':'Keep this page open while you travel.'}</p>
       <div class="row"><label class="field" style="max-width:170px"><span>Travel time (minutes)</span><input id="eta-${j.id}" type="number" min="1" max="240" value="25"></label>
       <button class="btn teal" data-act="startTrip" data-id="${j.id}" style="align-self:flex-end">Start trip</button></div>`;
   } else if(s==='enroute' && staleTrip(j)){
@@ -857,7 +939,7 @@ function techNext(j){
   } else if(s==='enroute'){
     const near = j.dest && GPS.last && haversineKm(GPS.last, j.dest) < 0.15;
     if(near) h+=`<div class="callout teal"><b>You're at the customer's location.</b> Tap "I've arrived" to stop sharing your location.</div>`;
-    h+=`<h3>You're on the way</h3><p class="small">${GPS.error?`<b style="color:var(--coral-text)">${esc(GPS.error)}</b>`:GPS.watchId!=null?'Sharing your location. Keep this page open.':'Starting location sharing…'}</p>
+    h+=`<h3>You're on the way</h3><p class="small">${GPS.error?`<b style="color:var(--coral-text)">${esc(GPS.error)}</b>`:GPS.watchId!=null?(IN_APP?'Sharing your location. You can lock your phone.':'Sharing your location. Keep this page open.'):'Starting location sharing…'}</p>
       <div class="row"><button class="btn teal" data-act="arrived" data-id="${j.id}">I've arrived</button>${j.dest?`<a class="btn" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${j.dest.lat},${j.dest.lng}">Directions</a>`:''}</div>`;
   } else if(s==='onsite'){
     h+=`<h3>Finish the job</h3>
@@ -898,11 +980,22 @@ setInterval(()=>{ document.querySelectorAll('[data-eta]').forEach(el=>{ const j=
 /* Leaflet maps survive re-renders: the map element is detached and re-inserted. */
 const MAPS={};
 function icon(kind, text){ return window.L.divIcon({className:'', html:`<span class="pin pin-${kind}"><span>${esc(text||'')}</span></span>`, iconSize:[34,34], iconAnchor:[17,17]}); }
+const LEAFLET='https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/';
+let leafletP=null;
+function loadLeaflet(){
+  if(window.L) return Promise.resolve();
+  if(!leafletP) leafletP=new Promise((res,rej)=>{
+    const l=document.createElement('link'); l.rel='stylesheet'; l.href=LEAFLET+'leaflet.min.css'; document.head.appendChild(l);
+    const sc=document.createElement('script'); sc.src=LEAFLET+'leaflet.min.js'; sc.onload=()=>res(); sc.onerror=()=>{ leafletP=null; rej(new Error('map')); }; document.head.appendChild(sc);
+  });
+  return leafletP;
+}
 function attachMaps(){
   const seen=new Set();
   document.querySelectorAll('[data-map]').forEach(ph=>{
     const key=ph.dataset.map; seen.add(key);
-    if(!window.L){ ph.innerHTML='<p class="muted small" style="padding:12px">The map could not load. Check your connection.</p>'; return; }
+    if(!window.L){ ph.innerHTML='<p class="muted small" style="padding:12px">Loading the map…</p>';
+      loadLeaflet().then(schedRender).catch(()=>{ ph.innerHTML='<p class="muted small" style="padding:12px">The map could not load. Check your connection.</p>'; }); return; }
     let m=MAPS[key];
     if(m){ ph.replaceWith(m.el); setTimeout(()=>m.map.invalidateSize(),0); }
     else { m=MAPS[key]=createMap(key, ph); }
@@ -959,11 +1052,16 @@ function ensureGPS(){
   if(!j){ if(GPS.watchId!=null) stopGPS(); return; }
   if(GPS.watchId!=null && GPS.jobId===j.id) return;
   stopGPS(); GPS.jobId=j.id;
+  if(window.AndroidApp?.startTracking){
+    window.__nativeLocation = (lat, lng, acc) => { GPS.error=''; sendPos({coords:{latitude:lat, longitude:lng, accuracy:acc}}); };
+    window.__nativeLocationError = msg => { GPS.error=msg||''; schedRender(); };
+    try{ window.AndroidApp.startTracking(j.no||'', (SETTINGS.gpsIntervalSec||12)*1000); GPS.watchId='native'; return; }catch(e){ console.warn('native tracking', e); }
+  }
   if(!navigator.geolocation){ GPS.error='This browser cannot share location.'; return; }
   GPS.watchId=navigator.geolocation.watchPosition(p=>{ GPS.error=''; sendPos(p); }, e=>{ GPS.error = e.code===1? 'Location permission is blocked. Allow location for this site in your browser settings.' : 'Waiting for a GPS signal…'; schedRender(); }, {enableHighAccuracy:true, maximumAge:5000, timeout:30000});
   try{ navigator.wakeLock?.request('screen').then(w=>GPS.wake=w).catch(()=>{}); }catch(e){}
 }
-function stopGPS(){ if(GPS.watchId!=null && navigator.geolocation) navigator.geolocation.clearWatch(GPS.watchId); GPS.watchId=null; GPS.jobId=null; try{ GPS.wake?.release(); }catch(e){} GPS.wake=null; }
+function stopGPS(){ if(GPS.watchId==='native'){ try{ window.AndroidApp.stopTracking(); }catch(e){} } else if(GPS.watchId!=null && navigator.geolocation) navigator.geolocation.clearWatch(GPS.watchId); GPS.watchId=null; GPS.jobId=null; try{ GPS.wake?.release(); }catch(e){} GPS.wake=null; }
 function sendPos(p){
   const j=job(GPS.jobId); if(!j || j.arrivedAt || j.finishedAt || j.cancelled || staleTrip(j)) return;
   const pos={lat:+p.coords.latitude.toFixed(6), lng:+p.coords.longitude.toFixed(6), acc:Math.round(p.coords.accuracy||0), at:nowISO()};
@@ -1067,7 +1165,11 @@ const jobRef = id => d('jobs',id);
 const ACT = {
   authMode(el){ UI.authMode=el.dataset.v; render(); },
   async google(){ await run(()=>A.signInWithPopup(auth, new A.GoogleAuthProvider())); },
-  async signOut(){ stopGPS();
+  async verifySend(){ try{ await A.sendEmailVerification(ME.user); toast('Verification email sent'); }catch(e){ toast(errMsg(e)); } },
+  async verifiedContinue(){ try{ await ME.user.reload(); await ME.user.getIdToken(true); ME.user=auth.currentUser; }catch(e){}
+    if(!auth.currentUser?.emailVerified) return toast("Your email isn't verified yet. Open the link in the email we sent.");
+    ME.user=auth.currentUser; render(); },
+  async signOut(){ stopGPS(); clearTimeout(shellT); clearDeviceCopies();
     if(PUSH_TOKEN && ME.user){ try{ await F.updateDoc(d('users',ME.user.uid),{fcmTokens:F.arrayRemove(PUSH_TOKEN)}); }catch(e){} PUSH_TOKEN=null; }
     pushTried=null; await A.signOut(auth); },
   bell(){ UI.bell=!UI.bell; render(); },
@@ -1094,6 +1196,7 @@ const ACT = {
     }); },
   readAll(){ const b=F.writeBatch(db); (S.inbox||[]).filter(x=>!x.read).forEach(x=>b.update(d('inbox',inboxId(),'items',x.id),{read:true})); b.commit().catch(e=>toast(errMsg(e))); },
   async enablePush(){
+    if(window.AndroidApp?.requestPushToken){ pushTried=null; window.AndroidApp.requestPushToken(); toast('Allow notifications when your phone asks'); setTimeout(render, 1500); return; }
     try{ const p=await Notification.requestPermission(); if(p!=='granted'){ toast('Alerts were not allowed on this device.'); return render(); }
       await registerSW(); pushTried=null; await registerPush(); toast('Alerts are on for this device'); render(); }
     catch(e){ toast('This browser cannot show alerts.'); } },
@@ -1253,10 +1356,19 @@ const FORMS = {
     const kind = PORTAL==='admin' ? 'owner' : 'customer';
     if(kind==='owner' && OWNER_EXISTS!==false) return toast('This portal already has an office account. Sign in instead.');
     UI.creating=true; render();
-    const ok=await run(async()=>{ const cr=await A.createUserWithEmailAndPassword(auth, dd.email, dd.password); ME.user=cr.user; await A.updateProfile(cr.user,{displayName:dd.name}); await createProfile(dd, kind); }, kind==='owner'?'Welcome! Set up your company next.':'Account created');
+    const ok=await run(async()=>{
+      let cr;
+      try{ cr=await A.createUserWithEmailAndPassword(auth, dd.email, dd.password); }
+      catch(e){ if(String(e?.code).includes('email-already-in-use')) throw {message:`You already have an account with this email, perhaps with another company. Sign in with that password to ${kind==='owner'?'set up':'join'} ${brandName()}.`}; throw e; }
+      ME.user=cr.user; await A.updateProfile(cr.user,{displayName:dd.name});
+      if(kind==='owner'){ await A.sendEmailVerification(cr.user).catch(()=>{}); UI.ownerDraft=dd; return; }
+      await createProfile(dd, kind); }, kind==='owner'?'Account created. Check your email to verify it.':'Account created');
     UI.creating=false; if(ok && kind==='owner'){ UI.ptab='settings'; saveUI(); } render(); },
   async completeProfile(f,dd){ const kind=f.dataset.kind; UI.creating=true; render();
-    const ok=await run(()=>createProfile({...dd, email:ME.user.email}, kind)); UI.creating=false; if(ok && kind==='owner'){ UI.ptab='settings'; saveUI(); } render(); },
+    const ok=await run(async()=>{ try{ await createProfile({...dd, email:ME.user.email}, kind); }
+      catch(e){ if(kind==='owner' && String(e?.code).includes('permission')) throw {message:`This email isn't the one set up for ${brandName()}. Sign in with the email you gave the platform admin.`}; throw e; } }); UI.creating=false; if(ok && kind==='owner'){ UI.ptab='settings'; saveUI(); } render(); },
+  findCompany(f,dd){ const code=dd.code.toLowerCase().replace(/[^a-z0-9-]/g,''); if(!code) return;
+    location.href = location.protocol==='file:'||/^(localhost|127\.)/.test(location.hostname) ? `/${PORTAL_URL[PORTAL]}?c=${code}` : `/${code}${{customer:'',technician:'/tech',admin:'/admin'}[PORTAL]}`; },
   async reset(f,dd){ await run(()=>A.sendPasswordResetEmail(auth, dd.email), 'Check your email for the reset link'); UI.authMode='signin'; render(); }
 };
 const CHANGE = {
@@ -1284,8 +1396,8 @@ function start(def){
   const qs=new URLSearchParams(location.search), qj=qs.get('job'), qc=qs.get('chat');
   if(qj) UI.pendingJob=qj;
   if(qc) UI.pendingChat=qc;
-  if(qj||qc){ try{ history.replaceState(null,'',location.pathname); }catch(e){} }
-  if(CONFIGURED){ startAuth(); registerSW(); }
+  if(qj||qc){ try{ qs.delete('job'); qs.delete('chat'); history.replaceState(null,'',location.pathname+(qs.toString()?'?'+qs:'')); }catch(e){} }
+  if(CONFIGURED && CO){ startAuth(); registerSW(); }
   navigator.serviceWorker?.addEventListener('message', e=>{ if(e.data?.type!=='open') return; const q=new URL(e.data.url, location.href).searchParams, id=q.get('job'), ch=q.get('chat');
     if(ch) openChat(ch); else if(id){ if(job(id)) openJobById(id); else UI.pendingJob=id; } render(); });
   // Enter sends a chat message on a computer; Shift+Enter adds a new line.
@@ -1294,4 +1406,4 @@ function start(def){
   render();
 }
 
-export { A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CONFIG_ERROR, CUR, F, FORMS, GPS, HERO, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, lineEditor, loadImg, loadUI, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, view, workSec };
+export { A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
