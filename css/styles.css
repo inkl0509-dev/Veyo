@@ -540,3 +540,26 @@ body[data-portal="customer"] .wrap{max-width:1020px}
 .bp-icon{width:58px;height:58px;border-radius:14px;display:grid;place-items:center;box-shadow:0 4px 12px rgba(0,0,0,.18);overflow:hidden}
 .bp-icon img{width:72%;height:72%;object-fit:contain}
 .bp-app small{font-size:.72rem;color:#526C80}
+
+/* ---------- platform portal ---------- */
+body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5B4FC }
+.tenant-list{display:flex;flex-direction:column}
+.tenant{display:flex;flex-direction:column;gap:8px;padding:16px;border-bottom:1px solid var(--line)}
+.tenant:last-child{border-bottom:0}
+.t-name{font-size:1.05rem}
+.tl-link{display:grid;grid-template-columns:90px minmax(0,1fr) auto auto;gap:8px;align-items:center;font-size:.85rem}
+.tl-link .mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+@media (max-width:600px){ .tl-link{grid-template-columns:minmax(0,1fr) auto auto} .tl-link .label{grid-column:1/-1} }
+
+/* ---------- instant screen from the last visit, shown until live data arrives ---------- */
+#app.shell{pointer-events:none}
+#app.shell::before{content:"";position:fixed;top:0;left:0;height:3px;width:40%;z-index:3000;background:var(--hero-sun,#FFD166);animation:shellbar 1.1s ease-in-out infinite}
+@keyframes shellbar{0%{left:-40%}100%{left:100%}}
+@media (prefers-reduced-motion:reduce){ #app.shell::before{animation:none;width:100%;left:0;opacity:.6} }
+
+/* ---------- Android app start page ---------- */
+.role-pick{display:flex;flex-direction:column;gap:10px}
+.role-opt{all:unset;box-sizing:border-box;display:flex;flex-direction:column;gap:3px;padding:16px;border:2px solid var(--line);border-radius:var(--r);background:var(--surface);cursor:pointer}
+.role-opt:hover,.role-opt:focus-visible{border-color:var(--lagoon);background:var(--lagoon-soft)}
+.role-opt b{font-family:var(--f-display);font-size:1.15rem}
+.role-opt span{color:var(--muted);font-size:.9rem}
