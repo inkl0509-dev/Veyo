@@ -183,6 +183,7 @@ function estimate(b){
   return totals({lines:b.svcs.map(id=>({qty:b.units, rate:sv(id)?.price||0})), discount:0, gstRate:co().gstRate});
 }
 function bookWizard(me){
+  if(!K.loaded('services')) return '<div class="loading">Loading services…</div>';
   if(!S.services.length) return `<div class="empty card"><h3>Booking opens soon</h3><p>The office hasn't listed its services yet.</p></div>`;
   const b=UI.bk || (UI.bk=newBooking()), est=estimate(b);
   const steps=[bkService,bkAC,bkWhen,bkWhere,bkReview];
