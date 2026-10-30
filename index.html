@@ -10,6 +10,7 @@
   <link rel="manifest" href="/manifest-customer.webmanifest">
   <link rel="apple-touch-icon" href="/assets/icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="mobile-web-app-capable" content="yes">
   <!-- Start every connection and download at once, instead of one file after another. -->
   <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
@@ -20,6 +21,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="modulepreload" href="/js/customer.js">
   <link rel="modulepreload" href="/js/core.js">
+  <link rel="modulepreload" href="/js/tools.js">
   <link rel="modulepreload" href="/js/firebase-config.js">
   <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js" crossorigin>
   <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js" crossorigin>
@@ -37,7 +39,17 @@
     (function(){try{
       var m=location.search.match(/[?&]c=([a-z0-9-]+)/i), seg=(location.pathname.split('/').filter(Boolean)[0]||'').toLowerCase();
       var R=['tech','admin','platform','assets','css','js','functions','index','sw','api','www'];
-      var co=m?m[1].toLowerCase():(seg&&seg.indexOf('.')<0&&R.indexOf(seg)<0?seg:''); if(!co) return;
+      var co=m?m[1].toLowerCase():(seg&&seg.indexOf('.')<0&&R.indexOf(seg)<0?seg:'');
+      var local=/^(localhost|127\.)/.test(location.hostname);
+      if(!co){
+        /* No company in the address: open the company used last time, so the code is entered only once. */
+        if(/[?&]switch=1/.test(location.search)) return;
+        var last=localStorage.getItem('acsp-co'); if(!last) try{last=(JSON.parse(localStorage.getItem('acsp-app')||'{}').co)||'';}catch(e){}
+        if(last&&/^[a-z0-9-]+$/.test(last)){window.__REDIRECTING=1;location.replace(local?'/index.html?c='+last:'/'+last+'');document.getElementById('app').innerHTML='';}
+        return;
+      }
+      /* A home-screen app (iPhone or Android) opens straight into this company's portal. */
+      if(!m){var ml=document.querySelector('link[rel=manifest]'); if(ml) ml.href='/'+co+'/manifest-customer.webmanifest';}
       var css=localStorage.getItem('acsp-brandcss-'+co);
       if(css){var st=document.createElement('style');st.id='brand-vars';st.textContent=css;document.head.appendChild(st);document.body.setAttribute('data-brand','');}
       var shell=localStorage.getItem('acsp-shell-'+co+'-customer');
