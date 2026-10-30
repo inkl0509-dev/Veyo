@@ -553,7 +553,7 @@ const loaded = (...keys) => keys.every(k=>S.loaded[k]);
 
 /* ---------- auth ---------- */
 function startAuth(){
-  F.onSnapshot(tenantRef(), s=>{ S.tenant=s.exists()? s.data() : null; S.pub.tenant=true; schedRender(); }, ()=>{ S.tenant=null; S.pub.tenant=true; schedRender(); });
+  F.onSnapshot(tenantRef(), s=>{ S.tenant=s.exists()? s.data() : null; S.tenantErr=null; S.pub.tenant=true; schedRender(); }, e=>{ console.error('Company lookup failed', e); S.tenant=null; S.tenantErr=e?.code||'error'; S.pub.tenant=true; schedRender(); });
   // Public documents every portal needs before sign-in: who owns the portal, company branding, portal settings.
   F.onSnapshot(d('config','owner'), s=>{ OWNER_EXISTS=s.exists(); schedRender(); }, ()=>{ OWNER_EXISTS=true; schedRender(); });
   F.onSnapshot(d('config','portal'), s=>{ S.portal=s.exists()? s.data() : null; S.pub.portal=true; schedRender(); }, ()=>{ S.pub.portal=true; schedRender(); });
@@ -648,6 +648,8 @@ function view(){
   if(!CONFIGURED) return setupView();
   if(!CO) return findCompanyView();
   if(!S.pub.tenant) return waiting(`<div class="loading">Opening…</div>`);
+  if(!S.tenant && S.tenantErr==='permission-denied') return gateView("The database blocked this page", `Firestore refused to read company <b>${esc(CO)}</b>. Publish the latest <b>firestore.rules</b> in Firebase console → Firestore Database → Rules, then reload.`);
+  if(!S.tenant && S.tenantErr) return gateView("Couldn't reach the database", `Check your internet connection and reload. (${esc(S.tenantErr)})`);
   if(!S.tenant) return gateView("We couldn't find this company", `There's no company with the code <b>${esc(CO)}</b>. Check the link you were sent.`);
   if(S.tenant.status!=='active') return gateView(`${esc(S.tenant.name||'This service')} is unavailable`, 'This portal is paused for now. Please contact the company directly.');
   if(!S.pub.company || !S.pub.portal) return waiting(`<div class="loading">Opening the ${PORTAL_NAME[PORTAL].toLowerCase()}…</div>`);
