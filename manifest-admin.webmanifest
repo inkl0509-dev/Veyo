@@ -1,8 +1,8 @@
 {
-  "name": "AC Service \u00b7 Admin Portal",
+  "name": "AC Service · Admin Portal",
   "short_name": "AC Admin",
   "description": "Run the AC service desk.",
-  "start_url": "/admin.html",
+  "start_url": "./admin",
   "scope": "/",
   "display": "standalone",
   "background_color": "#F1F6FA",
