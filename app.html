@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>AC Service</title>
+  <meta name="theme-color" content="#0077B6">
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+</head>
+<body data-portal="customer">
+  <div id="app"><div class="loading">Opening…</div></div>
+  <script>
+    /* Already chose a company and portal on this phone? Go straight there. */
+    (function(){ try{
+      if(/[?&]switch=1/.test(location.search)) return;
+      var s=JSON.parse(localStorage.getItem('acsp-app')||'null');
+      if(s && s.path){ location.replace(s.path); }
+    }catch(e){} })();
+  </script>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
