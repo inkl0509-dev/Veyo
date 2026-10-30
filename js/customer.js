@@ -19,7 +19,7 @@ const ICON = {
 const svg = (p, cls='') => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${p}</svg>`;
 const TABS = [['home','Home',ICON.home],['book','Book',ICON.plus],['jobs','My services',ICON.list],['profile','Profile',ICON.user]];
 const ISSUES = ['Not cooling','Water leaking','Strange noise','Bad smell','Not turning on','Ice on the unit','Remote not working','Regular service'];
-const BK_STEPS = ['Service','Your AC','Date & time','Address','Review'];
+const BK_STEPS = ['What you need','When & where','Check & send'];
 
 const firstName = () => String(myCustomer()?.name || ME.profile?.name || '').split(' ')[0];
 function greeting(){ const h=+new Date().toLocaleString('en-US',{hour:'numeric',hourCycle:'h23',timeZone:TZ}); return h<12?'Good morning':h<17?'Good afternoon':'Good evening'; }
@@ -51,7 +51,7 @@ function home(me){
   const recent=jobs.filter(j=>!isActive(j)).slice(0,3);
   return `
   <section class="hello"><div><p class="muted">${greeting()},</p><h1>${esc(firstName())}</h1><p>What can we help you with today?</p></div>
-    <button class="btn coral lg" data-act="startBook">Book a service</button></section>
+    <div class="hello-acts"><button class="btn coral lg" data-act="startBook">Book a service</button>${lastJob()?`<button class="btn lg" data-act="bookAgain" data-id="${lastJob().id}">Book ${esc(jobTitle(lastJob()))} again</button>`:''}${callBtn('lg')}</div></section>
   ${pushBanner()}
   ${live?liveCard(live):''}
   ${todo.length?`<section class="csec"><h2>Needs your attention</h2><div class="todo">${todo.map(todoItem).join('')}</div></section>`:''}
@@ -90,6 +90,8 @@ function jobCard(j){
     <span class="jc-main"><b>${esc(jobTitle(j))}</b><small>${esc(j.no)}${j.slot?' · '+t12s(j.slot.time):j.window?' · '+esc(WINDOWS[j.window].split(',')[0]):''}${t?' · '+esc(t.name):''}</small></span>${pill(j)}</button>`;
 }
 const t12s = hm => K.t12(hm);
+const lastJob = () => sortJobs(S.jobs).find(j=>!j.cancelled && j.serviceIds?.length);
+function callBtn(size='sm'){ const C=co(); return C.phone?`<a class="btn ${size}" href="tel:${esc(C.phone.replace(/\s/g,''))}">${svg(ICON.phone,'ic')} Call us</a>`:''; }
 function svcTile(s,i){ return `<button class="svc-tile" data-act="startBook" data-svc="${s.id}"><span class="sicon c${i%5}"><svg viewBox="0 0 24 24">${SVC_ICONS[i%5]}</svg></span><b>${esc(s.name)}</b><small>from ${money(s.price)}</small></button>`; }
 function howItWorks(){
   return `<section class="csec"><h2>How it works</h2><ol class="how">
@@ -143,13 +145,16 @@ function customerJob(j){
   const st=statusInfo(j), s=stage(j);
   let h=`<div class="cjob"><button class="btn sm" data-act="closeJob">← Back</button>
     <section class="status-hero tone-${st.tone}"><span class="mono small">${esc(j.no)} · ${esc(jobTitle(j))}</span><h1>${st.title}</h1><p>${st.sub}</p></section>
-    ${s!=='cancelled'?miniSteps(j):''}<div class="pane cpane">`;
-  if(j.departedAt) h+=trackingSec(j);
+    ${s!=='cancelled'?miniSteps(j):''}
+    <div class="quick-acts">${callBtn()}<button class="btn sm" data-act="toMessages" data-id="${j.id}">Message us</button>${(s==='paid'||s==='cancelled'||j.rating)?`<button class="btn sm primary" data-act="bookAgain" data-id="${j.id}">Book this again</button>`:''}</div>
+    <div class="pane cpane">`;
+  if(j.departedAt && !j.finishedAt) h+=trackingSec(j);
   if(j.quote?.status==='sent') h+=quoteSec(j);
   if(j.invoice && j.payment?.status!=='paid') h+=invoiceSec(j);
   if(j.finishedAt && !j.rating) h+=ratingSec(j);
   h+=detailsSec(j);
   if(j.finishedAt) h+=workSec(j);
+  if(j.departedAt && j.finishedAt) h+=trackingSec(j);
   if(j.quote && j.quote.status!=='sent') h+=quoteSec(j);
   if(j.invoice && j.payment?.status==='paid') h+=invoiceSec(j);
   if(j.rating) h+=ratingSec(j);
@@ -174,9 +179,13 @@ function bookingDates(){
   for(let i=lead;i<lead+10;i++) out.push(addDays(today(),i));
   return out;
 }
-function newBooking(svcId){
-  const me=myCustomer()||{}, w=Object.keys(WINDOWS).filter(k=>PCFG().windows[k]);
-  return {step:svcId?2:1, svcs:svcId?[svcId]:[], units:1, acType:AC_TYPES[0], btu:'12,000 BTU', issues:[], note:'', date:bookingDates()[PCFG().leadDays?0:1]||bookingDates()[0], window:w[0]||'morning', island:me.island||'', address:me.address||'', savePin:me.lat==null};
+/* A new booking starts from what we already know: the saved address and the AC from the last booking. */
+function newBooking(svcId, from){
+  const me=myCustomer()||{}, w=Object.keys(WINDOWS).filter(k=>PCFG().windows[k]), last=from||lastJob()||{};
+  const svcs=from? (from.serviceIds||[]).filter(id=>sv(id)) : svcId? [svcId] : [];
+  return {step:from&&svcs.length?2:1, svcs, units:last.units||1, acType:last.acType||AC_TYPES[0], btu:last.btu||'Not sure', issues:[], note:'',
+    date:bookingDates()[PCFG().leadDays?0:1]||bookingDates()[0], window:w[0]||'morning', island:me.island||last.island||'', address:me.address||last.address||'',
+    savePin:me.lat==null, editAddr:!(me.address||last.address)};
 }
 function estimate(b){
   if(!b.svcs.length) return null;
@@ -186,55 +195,53 @@ function bookWizard(me){
   if(!K.loaded('services')) return '<div class="loading">Loading services…</div>';
   if(!S.services.length) return `<div class="empty card"><h3>Booking opens soon</h3><p>The office hasn't listed its services yet.</p></div>`;
   const b=UI.bk || (UI.bk=newBooking()), est=estimate(b);
-  const steps=[bkService,bkAC,bkWhen,bkWhere,bkReview];
+  const steps=[bkNeed,bkWhenWhere,bkReview];
   return `<section class="wiz">
     <div class="wiz-top"><h1 class="ctitle">Book a service</h1>
       <ol class="wiz-steps">${BK_STEPS.map((l,i)=>`<li class="${i+1<b.step?'done':i+1===b.step?'cur':''}">${i+1<b.step?`<button data-act="bkGo" data-v="${i+1}">`:'<span>'}<i>${i+1}</i><span class="ws-l">${l}</span>${i+1<b.step?'</button>':'</span>'}</li>`).join('')}</ol></div>
     <div class="wiz-body card">${steps[b.step-1](b,me)}</div>
     <div class="wiz-bar">${b.step>1?'<button class="btn" data-act="bkBack">Back</button>':'<span></span>'}
       <div class="est">${est?`<span class="small">Estimate</span><b>${money(est.total)}</b>`:''}</div>
-      ${b.step<5?'<button class="btn primary" data-act="bkNext">Next</button>':'<button class="btn coral" data-act="bkSend">Send request</button>'}</div>
+      ${b.step<3?'<button class="btn primary" data-act="bkNext">Next</button>':'<button class="btn coral" data-act="bkSend">Send request</button>'}</div>
   </section>`;
 }
-function bkService(b){
-  return `<h2>What do you need?</h2><p class="muted">Choose one or more. Prices are per AC unit, before GST.</p>
-    <div class="svc-pick">${S.services.map((s,i)=>`<button class="svc-opt" data-act="bkSvc" data-id="${s.id}" aria-pressed="${b.svcs.includes(s.id)}"><span class="sicon c${i%5}"><svg viewBox="0 0 24 24">${SVC_ICONS[i%5]}</svg></span><span class="so-txt"><b>${esc(s.name)}</b><small>${esc(s.desc||'')}</small></span><span class="so-price">${money(s.price)}</span><span class="so-check" aria-hidden="true"></span></button>`).join('')}</div>`;
-}
 function chips(k, list, cur){ return `<div class="chips big">${list.map(v=>`<button class="chip" data-act="bkSet" data-k="${k}" data-v="${esc(v)}" aria-pressed="${cur===v}">${esc(v)}</button>`).join('')}</div>`; }
-function bkAC(b){
-  return `<h2>Tell us about your AC</h2>
-    <div class="field"><span>How many units?</span><div class="stepper"><button data-act="bkUnits" data-d="-1" aria-label="Fewer units">−</button><b>${b.units}</b><button data-act="bkUnits" data-d="1" aria-label="More units">+</button></div></div>
-    <div class="field"><span>Type of AC</span>${chips('acType',AC_TYPES,b.acType)}</div>
-    <div class="field"><span>Capacity <small class="muted">(on the sticker on the indoor unit)</small></span>${chips('btu',BTUS,b.btu)}</div>
-    <div class="field"><span>What's the problem? <small class="muted">(pick any)</small></span><div class="chips big">${ISSUES.map(v=>`<button class="chip" data-act="bkIssue" data-v="${esc(v)}" aria-pressed="${b.issues.includes(v)}">${esc(v)}</button>`).join('')}</div></div>
-    <label class="field"><span>Anything else we should know? <small class="muted">(optional)</small></span><textarea id="bk-note" data-bk="note" placeholder="e.g. The bedroom unit drips water at night">${esc(b.note)}</textarea></label>`;
+function bkNeed(b){
+  return `<h2>What do you need?</h2><p class="muted">Tap a service. You can pick more than one.</p>
+    <div class="svc-pick">${S.services.map((s,i)=>`<button class="svc-opt" data-act="bkSvc" data-id="${s.id}" aria-pressed="${b.svcs.includes(s.id)}"><span class="sicon c${i%5}"><svg viewBox="0 0 24 24">${SVC_ICONS[i%5]}</svg></span><span class="so-txt"><b>${esc(s.name)}</b><small>${esc(s.desc||'')}</small></span><span class="so-price">${money(s.price)}<small>per unit</small></span><span class="so-check" aria-hidden="true"></span></button>`).join('')}</div>
+    <div class="field"><span>How many AC units?</span><div class="stepper"><button data-act="bkUnits" data-d="-1" aria-label="Fewer units">−</button><b>${b.units}</b><button data-act="bkUnits" data-d="1" aria-label="More units">+</button></div></div>
+    <div class="field"><span>What's wrong? <small class="muted">(optional, pick any)</small></span><div class="chips big">${ISSUES.map(v=>`<button class="chip" data-act="bkIssue" data-v="${esc(v)}" aria-pressed="${b.issues.includes(v)}">${esc(v)}</button>`).join('')}</div></div>
+    ${b.more?`<div class="field"><span>Type of AC</span>${chips('acType',AC_TYPES,b.acType)}</div>
+      <div class="field"><span>Size <small class="muted">(on the sticker on the indoor unit)</small></span>${chips('btu',BTUS,b.btu)}</div>
+      <label class="field"><span>Anything else? <small class="muted">(optional)</small></span><textarea id="bk-note" data-bk="note" placeholder="e.g. The bedroom unit drips water at night">${esc(b.note)}</textarea></label>`
+    :`<button class="more-row" data-act="bkMore"><span><b>${esc(b.acType)} · ${esc(b.btu)}</b><small>AC type, size and a note (optional)</small></span><span class="linkbtn">Change</span></button>`}`;
 }
-function bkWhen(b){
+function bkWhenWhere(b){
   const dates=bookingDates(), t=today();
   const label = dt => dt===t?'Today':dt===addDays(t,1)?'Tomorrow':new Date(dt+'T12:00:00Z').toLocaleDateString('en-GB',{weekday:'short',timeZone:'UTC'});
-  const w=Object.entries(WINDOWS).filter(([k])=>PCFG().windows[k]);
-  return `<h2>When suits you?</h2><p class="muted">Pick a day and a time window. The office confirms the exact time.</p>
+  const w=Object.entries(WINDOWS).filter(([k])=>PCFG().windows[k]), pinned=UI.pick.book||pickDefault('home');
+  return `<h2>When should we come?</h2>
     <div class="date-row">${dates.map(dt=>{ const x=new Date(dt+'T12:00:00Z'); return `<button class="date-chip" data-act="bkSet" data-k="date" data-v="${dt}" aria-pressed="${b.date===dt}"><small>${label(dt)}</small><b>${x.getUTCDate()}</b><small>${x.toLocaleDateString('en-GB',{month:'short',timeZone:'UTC'})}</small></button>`; }).join('')}</div>
-    <label class="field" style="max-width:240px"><span>Or choose another date</span><input type="date" id="bk-date" data-np data-bkdate min="${dates[0]}" value="${esc(b.date)}"></label>
-    <div class="field"><span>Time window</span><div class="win-pick">${w.map(([k,v])=>{ const [n,r]=v.split(', '); return `<button class="win-opt" data-act="bkSet" data-k="window" data-v="${k}" aria-pressed="${b.window===k}"><b>${n}</b><small>${r}</small></button>`; }).join('')}</div></div>`;
-}
-function bkWhere(b){
-  return `<h2>Where should we come?</h2>
-    <div class="grid2"><label class="field"><span>Island / city</span><input id="bk-island" data-bk="island" value="${esc(b.island)}" placeholder="Malé, Hulhumalé, Thulusdhoo…"></label>
-    <label class="field"><span>Address</span><input id="bk-addr" data-bk="address" value="${esc(b.address)}" placeholder="House name, road, floor"></label></div>
-    <div class="field"><span>Pin the exact spot <small class="muted">(helps the technician find you)</small></span><div class="map small" data-map="pick-book"></div>
-      <div class="row"><span class="small muted" data-pickinfo="book"></span><button type="button" class="btn sm" data-act="locate" data-key="book">Use my current location</button></div></div>
-    <label class="row small" style="gap:8px"><input type="checkbox" id="bk-save" data-bk="savePin" ${b.savePin?'checked':''}> Save this as my home address</label>`;
+    <details class="small other-date"${dates.includes(b.date)?'':' open'}><summary>Another date</summary><input type="date" id="bk-date" data-np data-bkdate min="${dates[0]}" value="${esc(b.date)}" style="max-width:220px;margin-top:8px"></details>
+    <div class="win-pick">${w.map(([k,v])=>{ const [n,r]=v.split(', '); return `<button class="win-opt" data-act="bkSet" data-k="window" data-v="${k}" aria-pressed="${b.window===k}"><b>${n}</b><small>${r}</small></button>`; }).join('')}</div>
+    <p class="small muted">The office confirms the exact time.</p>
+    <h2 style="margin-top:22px">Where?</h2>
+    ${!b.editAddr?`<div class="addr-card"><span class="pin-ic" aria-hidden="true">📍</span><span><b>${esc(b.address)}</b><small>${esc(b.island)}${pinned?' · pinned on the map':''}</small></span><button class="linkbtn" data-act="bkEditAddr">Change</button></div>`
+    :`<div class="grid2"><label class="field"><span>Island / city</span><input id="bk-island" data-bk="island" value="${esc(b.island)}" placeholder="Malé, Hulhumalé, Thulusdhoo…"></label>
+      <label class="field"><span>Address</span><input id="bk-addr" data-bk="address" value="${esc(b.address)}" placeholder="House name, road, floor"></label></div>
+      <div class="field"><span>Pin the exact spot <small class="muted">(helps the technician find you)</small></span><div class="map small" data-map="pick-book"></div>
+        <div class="row"><span class="small muted" data-pickinfo="book"></span><button type="button" class="btn sm" data-act="locate" data-key="book">Use my current location</button></div></div>
+      <label class="row small" style="gap:8px"><input type="checkbox" id="bk-save" data-bk="savePin" ${b.savePin?'checked':''}> Remember this address</label>`}`;
 }
 function bkReview(b){
   const est=estimate(b), w=WINDOWS[b.window]||'';
   const row=(l,v,step)=>`<div class="rv-row"><span class="label">${l}</span><b>${v}</b><button class="linkbtn" data-act="bkGo" data-v="${step}">Change</button></div>`;
-  return `<h2>Check and send</h2>
-    <div class="rv">${row('Services',b.svcs.map(id=>esc(sv(id)?.name)).join(', '),1)}
-      ${row('Your AC',`${b.units} × ${esc(b.acType)}, ${esc(b.btu)}`,2)}
-      ${row('Problem',esc([...b.issues,b.note].filter(Boolean).join('. ')||'Not described'),2)}
-      ${row('When',`${fd(b.date)}, ${esc(w.split(',')[0].toLowerCase())} (${esc(w.split(', ')[1]||'')})`,3)}
-      ${row('Where',`${esc(b.address)}, ${esc(b.island)}${(UI.pick.book||pickDefault('home'))?' · pinned on map':''}`,4)}</div>
+  return `<h2>Check and send</h2><p class="muted">Nothing to pay now. We confirm the time and price first.</p>
+    <div class="rv">${row('Service',b.svcs.map(id=>esc(sv(id)?.name)).join(', '),1)}
+      ${row('Your AC',`${b.units} × ${esc(b.acType)}, ${esc(b.btu)}`,1)}
+      ${row('Problem',esc([...b.issues,b.note].filter(Boolean).join('. ')||'Not described'),1)}
+      ${row('When',`${fd(b.date)}, ${esc(w.split(',')[0].toLowerCase())} (${esc(w.split(', ')[1]||'')})`,2)}
+      ${row('Where',`${esc(b.address)}, ${esc(b.island)}${(UI.pick.book||pickDefault('home'))?' · pinned on map':''}`,2)}</div>
     ${est?`<div class="est-box"><div class="tot">${b.svcs.map(id=>`<span>${esc(sv(id)?.name)} × ${b.units}</span><span>${money((sv(id)?.price||0)*b.units)}</span>`).join('')}<span>GST ${est.rate}%</span><span>${money(est.gst)}</span><span class="grand">Estimated total</span><span class="grand">${money(est.total)}</span></div>
       <p class="small muted">This is an estimate. The office confirms the final price in a quotation for you to approve before work starts.</p></div>`:''}`;
 }
@@ -271,11 +278,15 @@ const actions = {
   bkGo(el){ UI.bk.step=+el.dataset.v; render(); scrollTo(0,0); },
   bkBack(){ UI.bk.step=Math.max(1,UI.bk.step-1); render(); scrollTo(0,0); },
   bkNext(){ const b=UI.bk;
-    if(b.step===1 && !b.svcs.length) return toast('Choose at least one service.');
-    if(b.step===3 && (!b.date || !b.window)) return toast('Choose a day and a time window.');
-    if(b.step===3 && b.date < bookingDates()[0]) return toast(`The earliest day you can book is ${fd(bookingDates()[0])}.`);
-    if(b.step===4 && (!b.island.trim() || !b.address.trim())) return toast('Enter your island and address.');
+    if(b.step===1 && !b.svcs.length) return toast('Tap the service you need.');
+    if(b.step===2 && (!b.date || !b.window)) return toast('Choose a day and a time.');
+    if(b.step===2 && b.date < bookingDates()[0]) return toast(`The earliest day you can book is ${fd(bookingDates()[0])}.`);
+    if(b.step===2 && (!b.island.trim() || !b.address.trim())){ b.editAddr=true; render(); return toast('Enter your island and address.'); }
     b.step++; render(); scrollTo(0,0); },
+  bkMore(){ UI.bk.more=true; render(); },
+  bkEditAddr(){ UI.bk.editAddr=true; render(); },
+  bookAgain(el){ const j=job(el.dataset.id); UI.bk=newBooking(null, j); UI.ctab='book'; UI.sel=''; saveUI(); render(); scrollTo(0,0); },
+  toMessages(el){ const t=document.getElementById('msg-'+el.dataset.id); if(t){ t.scrollIntoView({behavior:'smooth',block:'center'}); setTimeout(()=>t.focus({preventScroll:true}),350); } },
   bkSend(el){ const b=UI.bk, me=myCustomer(), p=UI.pick.book || pickDefault('home');
     el.disabled=true;
     run(async()=>{
