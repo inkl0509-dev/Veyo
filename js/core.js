@@ -479,7 +479,7 @@ function bellPanel(){
 }
 function modalView(){
   if(!UI.modal) return '';
-  return `<div class="backdrop" data-act="modalClose"></div><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(UI.modal.title)}"><div class="modal-h"><h3>${esc(UI.modal.title)}</h3><button class="icon" data-act="modalClose" aria-label="Close">×</button></div><div class="modal-b">${UI.modal.html}</div></div>`;
+  return `<div class="backdrop" data-act="modalClose"></div><div class="modal${UI.modal.wide?' wide':''}" role="dialog" aria-modal="true" aria-label="${esc(UI.modal.title)}"><div class="modal-h"><h3>${esc(UI.modal.title)}</h3><button class="icon" data-act="modalClose" aria-label="Close">×</button></div><div class="modal-b">${UI.modal.html}</div></div>`;
 }
 
 /* ---------- payment receipts ----------
@@ -833,7 +833,7 @@ function jobDetail(j){
   if(j.departedAt) h+=trackingSec(j);
   if(role==='technician') h+=`<div class="sec"><div class="row" style="justify-content:space-between"><span class="small muted">Questions about this job? Customers don't see this chat.</span><button class="btn sm" data-act="openChat" data-job="${j.id}">Message the office</button></div></div>`;
   h+=requestSec(j)+scheduleSec(j)+quoteSec(j)+techSec(j);
-  if(j.finishedAt) h+=workSec(j);
+  if(j.finishedAt) h+=workSec(j)+reportSec(j);
   h+=invoiceSec(j)+ratingSec(j)+messagesSec(j);
   if(s!=='cancelled' && !j.departedAt && (role==='provider' || (role==='customer' && PCFG().customerCancel))) h+=`<div class="sec"><div class="row"><button class="btn danger sm ${UI.confirm==='cancel'+j.id?'armed':''}" data-act="cancelJob" data-id="${j.id}">${UI.confirm==='cancel'+j.id?'Tap again to cancel this request':'Cancel request'}</button></div></div>`;
   return h;
@@ -963,9 +963,8 @@ function techNext(j){
     h+=`<h3>You're on the way</h3><p class="small">${GPS.error?`<b style="color:var(--coral-text)">${esc(GPS.error)}</b>`:GPS.watchId!=null?(IN_APP?'Sharing your location. You can lock your phone.':'Sharing your location. Keep this page open.'):'Starting location sharing…'}</p>
       <div class="row"><button class="btn teal" data-act="arrived" data-id="${j.id}">I've arrived</button>${j.dest?`<a class="btn" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${j.dest.lat},${j.dest.lng}">Directions</a>`:''}</div>`;
   } else if(s==='onsite'){
-    h+=`<h3>Finish the job</h3>
-      <label class="field"><span>Work done</span><textarea id="wn-${j.id}" placeholder="e.g. Cleaned filters and coil, topped up R32 gas, outlet 9°C"></textarea></label>
-      <label class="field"><span>Parts or gas used (optional)</span><input id="wp-${j.id}" placeholder="e.g. 0.5 kg R32, 1 capacitor 35µF"></label>
+    h+=`<h3>Finish the job</h3><p class="small">Fill in the service report. The customer gets it when you or the office send it.</p>
+      ${reportForm(j, 'rf-'+j.id)}
       <div class="row"><button class="btn teal" data-act="finish" data-id="${j.id}">Mark job finished</button></div>`;
   } else if(s==='cancelled') h+=`<h3>This request was cancelled</h3>`;
   else h+=`<h3>Job finished ${fdt(j.finishedAt)}</h3><p class="small">${j.payment?.status==='paid'?'Paid. Nothing left to do.':j.payment?.status==='pending'?'The customer will pay by '+METHODS[j.payment.method]?.n.toLowerCase()+'. Collect it and hand it to the office.':j.invoice?'Invoice raised. Waiting for the customer to pay.':'The office will raise the invoice.'}</p>`;
@@ -1101,6 +1100,98 @@ function workSec(j){
     <div><span class="label">Finished</span><b>${fdt(j.finishedAt)}</b></div>
     ${j.arrivedAt?`<div><span class="label">Time on site</span><b>${Math.max(1,Math.round((new Date(j.finishedAt)-new Date(j.arrivedAt))/60000))} min</b></div>`:''}</div>
     ${j.workNotes?`<div class="callout teal"><span class="label">Work done</span><p>${esc(j.workNotes)}</p>${j.parts?`<p class="small">Parts and gas: ${esc(j.parts)}</p>`:''}</div>`:''}</div>`;
+}
+
+
+/* ---------- service report ----------
+   The technician fills it in when finishing (checklist, readings, condition, advice, next service).
+   The office or the technician sends it to the customer, who can view, print or save it as a PDF. */
+const CHECKS = ['Filters cleaned','Indoor coil cleaned','Outdoor coil washed','Drain pipe cleared','Drain pan cleaned','Blower / fan cleaned','Gas pressure checked','Electrical connections checked','Remote / thermostat tested','Test run OK'];
+const CONDITION = {good:['Good','teal'], attention:['Needs attention soon','mango'], repair:['Needs repair','bad']};
+const GASES = ['R32','R410A','R22','Other'];
+const NEXT_MONTHS = [3,4,6,12];
+function addMonths(iso, m){ const x=new Date(iso+'T12:00:00Z'); x.setUTCMonth(x.getUTCMonth()+m); return x.toISOString().slice(0,10); }
+function reportForm(j, px){
+  const r=j.report||{}, rd=r.readings||{}, ck=new Set(r.checks||[]), nm=r.nextMonths||3;
+  const num=(k,l,ph,unit)=>`<label class="field"><span>${l}</span><div class="unit-in"><input id="${px}-${k}" type="number" inputmode="decimal" step="any" value="${esc(rd[k]??'')}" placeholder="${ph}"><i>${unit}</i></div></label>`;
+  return `<div class="report-form">
+    <div class="field"><span>Checklist <small class="muted">(tick what you did)</small></span><div class="checks">${CHECKS.map((c,i)=>`<label class="check"><input type="checkbox" id="${px}-c${i}" ${ck.has(c)?'checked':''}><span>${esc(c)}</span></label>`).join('')}</div></div>
+    <div class="field"><span>Readings <small class="muted">(optional)</small></span>
+      <div class="grid3"><label class="field"><span>Gas</span><select id="${px}-gas">${GASES.map(g=>`<option ${(rd.gas||'R32')===g?'selected':''}>${g}</option>`).join('')}</select></label>
+        ${num('psi','Suction pressure','120','psig')}${num('amps','Running current','5.2','A')}
+        ${num('ret','Return air (room)','26','°C')}${num('sup','Supply air (outlet)','14','°C')}${num('volts','Voltage','230','V')}</div></div>
+    <div class="grid2"><label class="field"><span>Units serviced</span><input id="${px}-units" type="number" min="1" max="50" value="${esc(r.unitsDone||j.units||1)}"></label>
+      <label class="field"><span>Condition after service</span><select id="${px}-cond">${Object.entries(CONDITION).map(([k,[l]])=>`<option value="${k}" ${(r.condition||'good')===k?'selected':''}>${l}</option>`).join('')}</select></label></div>
+    <label class="field"><span>Work done</span><textarea id="${px}-notes" placeholder="e.g. Cleaned filters and coil, cleared the drain, topped up R32">${esc(j.workNotes||'')}</textarea></label>
+    <label class="field"><span>Parts or gas used (optional)</span><input id="${px}-parts" value="${esc(j.parts||'')}" placeholder="e.g. 0.5 kg R32, 1 capacitor 35µF"></label>
+    <label class="field"><span>Advice for the customer (optional)</span><textarea id="${px}-advice" placeholder="e.g. Clean the filters every 2 weeks. The outdoor unit is rusting at the base.">${esc(r.advice||'')}</textarea></label>
+    <div class="field"><span>Next service</span><div class="chips">${NEXT_MONTHS.map(m=>`<label class="chip-radio"><input type="radio" id="${px}-n${m}" name="${px}-next" value="${m}" ${nm===m?'checked':''}><span>${m} months</span></label>`).join('')}<label class="chip-radio"><input type="radio" id="${px}-n0" name="${px}-next" value="0" ${nm===0?'checked':''}><span>Not needed</span></label></div></div>
+  </div>`;
+}
+function readReportForm(j, px){
+  const g=k=>document.getElementById(`${px}-${k}`)?.value?.trim() ?? '';
+  const n=k=>{ const v=g(k); return v===''? null : +v; };
+  const checks=CHECKS.filter((c,i)=>document.getElementById(`${px}-c${i}`)?.checked);
+  const nextMonths=+(document.querySelector(`input[name="${px}-next"]:checked`)?.value ?? 3);
+  const base=(j.finishedAt||nowISO()).slice(0,10);
+  const readings={gas:g('gas'), psi:n('psi'), amps:n('amps'), ret:n('ret'), sup:n('sup'), volts:n('volts')};
+  return {notes:g('notes'), parts:g('parts'), report:{checks, readings, unitsDone:+g('units')||j.units||1, condition:g('cond')||'good', advice:g('advice'),
+    nextMonths, nextService: nextMonths? addMonths(base, nextMonths) : null, by:ME.user.uid, byName:myName(), savedAt:nowISO()}};
+}
+const dT = rd => rd && rd.ret!=null && rd.sup!=null ? +(rd.ret-rd.sup).toFixed(1) : null;
+function reportDoc(j){
+  const r=j.report||{}, rd=r.readings||{}, C=co(), t=tech(j.techId), d0=dT(rd), cond=CONDITION[r.condition]||CONDITION.good;
+  const row=(l,v)=>v==null||v===''?'':`<tr><td>${l}</td><td><b>${v}</b></td></tr>`;
+  return `<article class="report-doc">
+    <header class="rd-head"><div class="rd-brand">${markSVG()}<div><b>${esc(C.name)}</b><small>${esc(C.address||'')}${C.phone?' · '+esc(C.phone):''}</small></div></div>
+      <div class="rd-title"><h2>Service report</h2><span class="mono">${esc(j.no)}</span><small>${fd(j.finishedAt||r.savedAt)}</small></div></header>
+    <div class="rd-grid"><div><span class="label">Customer</span><b>${esc(j.customerName||'')}</b><small>${esc(j.address||'')}${j.island?', '+esc(j.island):''}</small></div>
+      <div><span class="label">Technician</span><b>${esc(t?.name||r.byName||'')}</b><small>${j.arrivedAt?'On site '+ft(j.arrivedAt)+'–'+ft(j.finishedAt):''}</small></div>
+      <div><span class="label">AC</span><b>${esc(r.unitsDone||j.units||1)} × ${esc(j.acType||'AC')}</b><small>${esc(j.btu||'')}</small></div>
+      <div><span class="label">Condition</span><b><span class="pill ${cond[1]}">${cond[0]}</span></b></div></div>
+    ${(r.checks||[]).length?`<h3>Work checklist</h3><ul class="rd-checks">${CHECKS.map(c=>`<li class="${r.checks.includes(c)?'ok':'no'}">${r.checks.includes(c)?'✓':'–'} ${esc(c)}</li>`).join('')}</ul>`:''}
+    ${(rd.psi!=null||rd.amps!=null||d0!=null||rd.volts!=null)?`<h3>Readings</h3><table class="rd-table">
+      ${row('Gas', rd.psi!=null? esc(rd.gas||'') : '')}${row('Suction pressure', rd.psi!=null? `${rd.psi} psig (${(rd.psi/14.5038).toFixed(2)} bar)` : null)}
+      ${row('Return air (room)', rd.ret!=null? rd.ret+' °C':null)}${row('Supply air (outlet)', rd.sup!=null? rd.sup+' °C':null)}
+      ${row('Temperature drop', d0!=null? `${d0} °C ${d0>=8&&d0<=14?'· good':d0<8?'· low':'· high'}` : null)}
+      ${row('Running current', rd.amps!=null? rd.amps+' A':null)}${row('Voltage', rd.volts!=null? rd.volts+' V':null)}</table>`:''}
+    ${j.workNotes?`<h3>Work done</h3><p>${esc(j.workNotes)}</p>`:''}
+    ${j.parts?`<h3>Parts and gas used</h3><p>${esc(j.parts)}</p>`:''}
+    ${r.advice?`<h3>Our advice</h3><p>${esc(r.advice)}</p>`:''}
+    ${r.nextService?`<div class="rd-next"><span class="label">Next service due</span><b>${fd(r.nextService)}</b></div>`:''}
+    <footer class="rd-foot small muted">Thank you for choosing ${esc(C.name)}.</footer></article>`;
+}
+function waNumber(phone){ let d=String(phone||'').replace(/\D/g,''); if(d.length===7) d='960'+d; return d; }
+function waLink(j){
+  const r=j.report||{}, C=co();
+  const text=`${C.name}: service report for ${j.no}\n${fd(j.finishedAt)} · ${r.unitsDone||j.units||1} × ${j.acType||'AC'}\n`+
+    (j.workNotes?`Work done: ${j.workNotes}\n`:'')+(r.advice?`Advice: ${r.advice}\n`:'')+(r.nextService?`Next service due: ${fd(r.nextService)}\n`:'')+
+    `Full report: ${new URL(portalHref('customer',{job:j.id}),location.href).href}`;
+  return `https://wa.me/${waNumber(j.customerPhone)}?text=${encodeURIComponent(text)}`;
+}
+function reportSec(j){
+  const role=ME.role, r=j.report;
+  if(!j.finishedAt) return '';
+  if(role==='customer'){
+    if(!j.reportSentAt) return '';
+    return `<div class="sec"><div class="sec-h"><h3>Service report</h3>${r?.condition?`<span class="pill ${CONDITION[r.condition][1]}">${CONDITION[r.condition][0]}</span>`:''}</div>
+      ${r?.nextService?`<p class="small">Next service due <b>${fd(r.nextService)}</b>.</p>`:''}${r?.advice?`<div class="callout"><span class="label">Our advice</span><p>${esc(r.advice)}</p></div>`:''}
+      <div class="row"><button class="btn primary" data-act="viewReport" data-id="${j.id}">View report</button></div></div>`;
+  }
+  const mine = role==='provider' || j.techId===ME.user.uid;
+  if(!mine) return '';
+  const canEdit = role==='provider' || !j.reportSentAt;
+  return `<div class="sec"><div class="sec-h"><h3>Service report</h3>${j.reportSentAt?`<span class="pill teal">Sent ${fd(j.reportSentAt)}</span>`:r?'<span class="pill mango">Not sent yet</span>':'<span class="pill">Not filled in</span>'}</div>
+    ${r?`<p class="small muted">${(r.checks||[]).length} checks done${dT(r.readings)!=null?' · temperature drop '+dT(r.readings)+' °C':''}${r.nextService?' · next service '+fd(r.nextService):''}</p>`:'<p class="small muted">Add the checklist and readings so the customer gets a full report.</p>'}
+    <div class="row">${r?`<button class="btn" data-act="viewReport" data-id="${j.id}">View</button>`:''}${canEdit?`<button class="btn" data-act="editReport" data-id="${j.id}">${r?'Edit':'Fill in report'}</button>`:''}
+      ${r?`<button class="btn ${j.reportSentAt?'':'primary'}" data-act="sendReport" data-id="${j.id}">${j.reportSentAt?'Send again':'Send to customer'}</button>`:''}
+      ${r && j.customerPhone?`<a class="btn wa" href="${waLink(j)}" target="_blank" rel="noopener">WhatsApp</a>`:''}</div></div>`;
+}
+function printReport(){
+  document.body.classList.add('print-report');
+  const done=()=>document.body.classList.remove('print-report');
+  if(window.AndroidApp?.print){ try{ window.AndroidApp.print(document.title); }catch(e){} setTimeout(done, 1500); return; }
+  window.addEventListener('afterprint', done, {once:true}); window.print(); setTimeout(done, 60000);
 }
 
 /* ---------- invoice & payment ---------- */
@@ -1324,12 +1415,22 @@ const ACT = {
     const trip={mins:Math.max(1,Math.round((Date.now()-new Date(j.departedAt))/60000)), km:Math.round(km*10)/10};
     run(async()=>{ await F.updateDoc(jobRef(j.id),{arrivedAt:nowISO(), trip, loc:F.deleteField(), trail:F.deleteField()}); CLEARED.add(j.id);
       await event(j,`${myName()} has arrived`,['customer','office'],'Technician has arrived'); }, 'Arrival recorded. Location sharing stopped.'); },
-  finish(el){ const j=job(el.dataset.id), notes=val('wn-'+j.id), parts=val('wp-'+j.id);
+  finish(el){ const j=job(el.dataset.id), {notes, parts, report}=readReportForm(j, 'rf-'+j.id);
     if(!notes) return toast('Describe the work done before finishing.');
     stopGPS();
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{finishedAt:nowISO(), workNotes:notes, parts, loc:F.deleteField(), trail:F.deleteField()});
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{finishedAt:nowISO(), workNotes:notes, parts, report, loc:F.deleteField(), trail:F.deleteField()});
       await event(j,`Work finished by ${myName()}: ${notes}`,['customer','office'],'Service finished'); }, 'Job marked finished'); },
 
+  viewReport(el){ const j=job(el.dataset.id); UI.modal={title:`Service report ${j.no}`, wide:true, html:reportDoc(j)+`<div class="row no-print" style="margin-top:14px"><button class="btn primary" data-act="printReport">Print or save as PDF</button>${ME.role!=='customer'&&j.customerPhone&&j.report?`<a class="btn wa" href="${waLink(j)}" target="_blank" rel="noopener">WhatsApp to customer</a>`:''}</div>`}; render(); },
+  printReport(){ printReport(); },
+  editReport(el){ const j=job(el.dataset.id); UI.modal={title:`Service report ${j.no}`, html:reportForm(j,'re-'+j.id)+`<div class="row"><button class="btn primary" data-act="saveReport" data-id="${j.id}">Save report</button></div>`}; render(); },
+  saveReport(el){ const j=job(el.dataset.id), {notes, parts, report}=readReportForm(j, 're-'+j.id);
+    if(!notes) return toast('Describe the work done.');
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{workNotes:notes, parts, report}); UI.modal=null; }, 'Report saved'); },
+  sendReport(el){ const j=job(el.dataset.id); if(!j.report) return toast('Fill in the report first.');
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{reportSentAt:nowISO()});
+      await event(j,`Service report sent by ${myName()}`,['customer'],'Your service report is ready');
+      await notify(j,[ME.role==='provider'?'tech':'office'],'Service report sent',`${j.no} · ${myName()} sent the service report to ${j.customerName||'the customer'}`); }, 'Report sent to the customer'); },
   sendInvoice(el){ const j=job(el.dataset.id), key='i-'+j.id, e=UI.ed[key];
     const lines=e.lines.filter(l=>String(l.desc).trim()).map(l=>({desc:String(l.desc).trim(),qty:+l.qty||0,rate:r2(l.rate)}));
     const methods=Object.keys(METHODS).filter(k=>e.methods[k]);
@@ -1447,4 +1548,4 @@ function start(def){
   render();
 }
 
-export { A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
+export { CHECKS, CONDITION, reportSec, reportDoc, waLink, waNumber, addMonths, printReport, A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
