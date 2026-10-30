@@ -1,5 +1,6 @@
 /* Admin / service-provider portal: runs the service desk and controls the customer and technician portals. */
 import * as K from './core.js';
+import { toolsView, toolActions } from './tools.js';
 const { S, ME, UI, F, db, ACCTS, METHODS, WINDOWS, CUR, PORTAL_URL, PORTAL_NAME, portalLink, portalHref, tenantRef, CO,
   esc, money, r2, fd, fdt, today, addDays, nowISO, initials, stars, avgRating, hint, stage, jobTitle, job, sv, co, PCFG,
   balances, sideBal, pill, jobItem, jobDetail, run, toast, render, saveUI, d, c, log, event, createLogin, pickDefault, val, chatThread, chatUnread, ago, loaded, BRAND_PRESETS, brandPalette, readLogo, defaultMarkSvg } = K;
@@ -7,11 +8,11 @@ const { S, ME, UI, F, db, ACCTS, METHODS, WINDOWS, CUR, PORTAL_URL, PORTAL_NAME,
 function providerView(){
   const n=S.jobs.filter(j=>hint(j)).length;
   const unreadChats=S.techs.filter(t=>chatUnread(t.id)).length;
-  const tabs=[['jobs','Service requests',n],['chat','Team chat',unreadChats],['customers','Customers'],['team','Team'],['portals','Portal controls'],['accounting','Accounting'],['settings','Company & services']];
+  const tabs=[['jobs','Service requests',n],['chat','Team chat',unreadChats],['customers','Customers'],['team','Team'],['portals','Portal controls'],['accounting','Accounting'],['tools','Tools & reminders',dueSoon().filter(x=>x.overdue).length],['settings','Company & services']];
   let h=`<nav class="tabs" role="tablist">${tabs.map(([k,l,cnt])=>`<button role="tab" aria-selected="${UI.ptab===k}" data-act="ptab" data-v="${k}">${l}${cnt?`<span class="count">${cnt}</span>`:''}</button>`).join('')}</nav>`;
   if(!S.services.length || !S.company?.address) h+=`<div class="notice"><b>Finish setting up.</b> Add your address, GST TIN, bank accounts, office location and the services you offer. Customers see them when booking and on every quotation and invoice. <button class="linkbtn" data-act="ptab" data-v="settings">Open company settings</button></div>`;
   // Each tab waits only for its own data.
-  const NEEDS={customers:['customers','users'], team:['techs','users'], chat:['chats','techs'], accounting:['ledger'], settings:['services'], portals:[]};
+  const NEEDS={tools:['customers'], customers:['customers','users'], team:['techs','users'], chat:['chats','techs'], accounting:['ledger'], settings:['services'], portals:[]};
   if(UI.ptab!=='jobs' && !loaded(...(NEEDS[UI.ptab]||[]))) return h+'<div class="loading">Loading…</div>';
   if(UI.ptab==='jobs') h+= UI.newJob ? newJobForm() : providerJobs();
   else if(UI.ptab==='chat') h+=chatTab();
@@ -19,8 +20,31 @@ function providerView(){
   else if(UI.ptab==='team') h+=teamView();
   else if(UI.ptab==='portals') h+=portalsView();
   else if(UI.ptab==='accounting') h+=accountingView();
+  else if(UI.ptab==='tools') h+=toolsView(remindersCard());
   else h+=settingsView();
   return h;
+}
+/* ---------- service reminders ----------
+   From each customer's latest service report: when the next service is due. Shows the ones due in the
+   next 3 weeks or overdue, unless the customer has already booked again. */
+function dueSoon(){
+  const latest={};
+  for(const j of S.jobs){ if(j.cancelled || !j.customerId) continue;
+    const prev=latest[j.customerId]; if(!prev || (j.createdAt||'')>(prev.createdAt||'')) latest[j.customerId]=j; }
+  const limit=addDays(today(),21);
+  return Object.values(latest).filter(j=>j.report?.nextService && j.finishedAt && j.report.nextService<=limit)
+    .map(j=>({j, due:j.report.nextService, overdue:j.report.nextService<today()})).sort((a,b)=>a.due.localeCompare(b.due));
+}
+function remindersCard(){
+  const list=dueSoon();
+  return `<section class="card" style="margin-bottom:16px"><div class="card-h"><h3>Service reminders</h3><span class="small muted">From the next-service date in each customer's last report</span></div>
+    ${list.length?`<ul class="remind-list">${list.map(({j,due,overdue})=>{ const cu=(S.customers||[]).find(x=>x.id===j.customerId), phone=j.customerPhone||cu?.phone;
+      return `<li><div style="min-width:0"><b>${esc(j.customerName||cu?.name||'Customer')}</b><span class="small muted">${esc(j.island||'')} · last service ${fd(j.finishedAt)} (${esc(j.no)})${j.reminderAt?' · reminded '+fd(j.reminderAt):''}</span></div>
+        <span class="pill ${overdue?'bad':'mango'}">${overdue?'Overdue since':'Due'} ${fd(due)}</span>
+        <div class="row">${cu?.hasLogin!==false?`<button class="btn sm primary" data-act="remind" data-id="${j.id}">Send reminder</button>`:''}
+          ${phone?`<a class="btn sm wa" target="_blank" rel="noopener" href="https://wa.me/${K.waNumber(phone)}?text=${encodeURIComponent(`Hello ${j.customerName||''}, this is ${co().name}. Your AC service is due ${fd(due)}. Reply here or book in our app to choose a time.`)}">WhatsApp</a>`:''}
+          <button class="btn sm" data-act="newJob" data-id="${j.customerId}">Book for them</button></div></li>`; }).join('')}</ul>`
+      :`<div class="empty"><p>No services due in the next 3 weeks. Reminders appear here from the "Next service" date technicians set in their reports.</p></div>`}</section>`;
 }
 function providerJobs(){
   const f=UI.filter, q=UI.q.trim().toLowerCase();
@@ -140,7 +164,6 @@ function portalsView(){
         <label class="field"><span>Message shown to customers</span><textarea id="pc-cn" name="customerNotice" placeholder="e.g. Closed on Friday. Emergency line +960 330 1122.">${esc(p.customerNotice)}</textarea></label>
       </div></div>
       <div class="card"><div class="card-h"><h3>Technician portal</h3></div><div class="card-b stack">
-        ${tog('techSeePrices','Technicians see quotation and invoice amounts','Turn off to hide prices in the technician portal.')}
         <label class="field"><span>Message shown to technicians</span><textarea id="pc-tn" name="techNotice" placeholder="e.g. Collect all cash payments before leaving the site.">${esc(p.techNotice)}</textarea></label>
         <p class="small muted">Create, pause or remove technician logins in the Team tab.</p>
       </div></div></div>
@@ -282,6 +305,10 @@ function settingsView(){
 
 /* ---------- admin actions ---------- */
 const actions = {
+  ...toolActions,
+  remind(el){ const j=job(el.dataset.id); el.disabled=true;
+    run(async()=>{ await F.updateDoc(K.jobRef(j.id),{reminderAt:nowISO()});
+      await K.notify(j,['customer'],'Time for your AC service',`Your next AC service is due ${fd(j.report.nextService)}. Tap to book a time that suits you.`); }, 'Reminder sent').finally(()=>el.disabled=false); },
   brandPreset(el){ const b=brandDraft(); b.color=el.dataset.a.toLowerCase(); b.color2=el.dataset.b.toLowerCase(); render(); },
   brandIconBg(el){ brandDraft().iconBg=el.dataset.v; render(); },
   brandLogoRemove(){ brandDraft().logo=''; render(); },
