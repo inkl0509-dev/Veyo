@@ -226,7 +226,38 @@ const tech = id => S.techs.find(x=>x.id===id);
 const job = id => S.jobs.find(x=>x.id===id) || (S.openJobs||[]).find(x=>x.id===id);
 // A job sent to one technician waits for them to accept it. Older jobs without assignStatus count as accepted.
 const accepted = j => !!j.techId && (j.assignStatus||'accepted')==='accepted';
-const jobTitle = j => (j.serviceIds||[]).map(id=>sv(id)?.name).filter(Boolean).join(', ') || 'AC service';
+const jobTitle = j => (j.serviceIds||[]).map(id=>sv(id)?.name).filter(Boolean).join(', ') || (j.issue ? 'AC check-up' : 'AC service');
+
+/* ---------- problems → services ----------
+   Customers can say what's wrong instead of picking a service. Each service can list the problems it fixes
+   (office: Company & services). Without that, the service name and description are matched against keywords. */
+const ISSUES = ['Not cooling','Water leaking','Strange noise','Bad smell','Not turning on','Ice on the unit','Remote not working','Regular service'];
+const ISSUE_WORDS = {
+  'Not cooling':        ['gas','refill','top-up','top up','recharge','general','service','clean','check','repair','diagnos'],
+  'Water leaking':      ['drain','leak','general','service','clean','check'],
+  'Strange noise':      ['repair','noise','fan','motor','check','diagnos','inspect','service'],
+  'Bad smell':          ['chemical','deep','wash','clean','general','service'],
+  'Not turning on':     ['repair','electric','pcb','check','diagnos','inspect','troubleshoot'],
+  'Ice on the unit':    ['gas','refill','top-up','top up','general','clean','service','check'],
+  'Remote not working': ['remote','repair','check','inspect'],
+  'Regular service':    ['general','maintenance','service','clean','routine']
+};
+/** Best-matching services for the chosen problems, best first (at most 2). */
+function recommendServices(issues){
+  if(!issues?.length || !S.services?.length) return [];
+  const tagged=S.services.filter(s=>(s.fixes||[]).length);
+  const score=new Map();
+  for(const s of S.services){
+    let n=0;
+    if(tagged.length){ n=(s.fixes||[]).filter(x=>issues.includes(x)).length*10; }
+    else {
+      const text=`${s.name} ${s.desc||''}`.toLowerCase();
+      for(const i of issues) (ISSUE_WORDS[i]||[]).forEach((w,k)=>{ if(text.includes(w)) n+=ISSUE_WORDS[i].length-k; });
+    }
+    if(n>0) score.set(s.id,n);
+  }
+  return [...score.entries()].sort((a,b)=>b[1]-a[1]).slice(0,2).map(([id])=>id);
+}
 const myCustomer = () => S.customers.find(x=>x.id===ME.user?.uid);
 
 function stage(j){
@@ -1552,4 +1583,4 @@ function start(def){
   render();
 }
 
-export { CHECKS, CONDITION, reportSec, reportDoc, waLink, waNumber, addMonths, printReport, A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
+export { ISSUES, recommendServices, CHECKS, CONDITION, reportSec, reportDoc, waLink, waNumber, addMonths, printReport, A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
