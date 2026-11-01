@@ -16,6 +16,8 @@ const PORTAL_ROLE = ROLE_OF[PORTAL];
 const PORTAL_URL = {customer:'index.html', technician:'tech.html', admin:'admin.html'};
 // Running inside the Android app (it adds a JavaScript bridge called AndroidApp).
 const IN_APP = !!window.AndroidApp || /ACServiceApp/.test(navigator.userAgent);
+// The Customer, Technician and Office apps open one portal each (empty in the older all-in-one app).
+const APP_ROLE = (navigator.userAgent.match(/ACRole\/(\w+)/)||[])[1] || '';
 // iPhone / iPad (iPadOS reports itself as a Mac with touch). STANDALONE: opened from the Home Screen.
 const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints>1);
 const STANDALONE = matchMedia('(display-mode: standalone)').matches || navigator.standalone===true;
@@ -707,7 +709,7 @@ function header(){
     <div class="brand">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
     ${PORTAL==='admin'?`<nav class="portal-links"><a href="${portalHref('customer')}" target="_blank" rel="noopener">Customer portal ↗</a><a href="${portalHref('technician')}" target="_blank" rel="noopener">Technician portal ↗</a></nav>`:''}
     <div class="me">${bellButton()}<span class="avatar">${esc(initials(ME.profile?.name))}</span><div class="me-txt"><div style="font-weight:700;line-height:1.2">${esc(ME.profile?.name||'')}</div><span class="role-badge ${ME.role}">${ME.role==='provider'?'Office':ME.role==='technician'?'Technician':'Customer'}</span></div>
-    ${IN_APP?'<a class="btn sm" href="/app.html?switch=1">Switch</a>':''}<button class="btn sm signout" data-act="signOut">Sign out</button></div>
+    ${IN_APP?`<a class="btn sm" href="/app.html?switch=1">${APP_ROLE?'Company':'Switch'}</a>`:''}<button class="btn sm signout" data-act="signOut">Sign out</button></div>
   </div></header>`;
 }
 function gateView(title, text, linkTo){
