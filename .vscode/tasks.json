@@ -1,0 +1,67 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Android: npm install",
+      "type": "shell",
+      "command": "npm install",
+      "options": {
+        "cwd": "${workspaceFolder}/mobile"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Android: build all 3 test apps",
+      "type": "npm",
+      "script": "build",
+      "path": "mobile",
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Android: run Customer app on phone",
+      "type": "npm",
+      "script": "customer",
+      "path": "mobile",
+      "problemMatcher": []
+    },
+    {
+      "label": "Android: run Technician app on phone",
+      "type": "npm",
+      "script": "tech",
+      "path": "mobile",
+      "problemMatcher": []
+    },
+    {
+      "label": "Android: run Office app on phone",
+      "type": "npm",
+      "script": "office",
+      "path": "mobile",
+      "problemMatcher": []
+    },
+    {
+      "label": "Android: build signed Play Store apps",
+      "type": "npm",
+      "script": "release",
+      "path": "mobile",
+      "problemMatcher": []
+    },
+    {
+      "label": "Android: open in Android Studio",
+      "type": "npm",
+      "script": "open",
+      "path": "mobile",
+      "problemMatcher": []
+    },
+    {
+      "label": "Android: show connected phones",
+      "type": "npm",
+      "script": "devices",
+      "path": "mobile",
+      "problemMatcher": []
+    }
+  ]
+}
