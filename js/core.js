@@ -92,7 +92,7 @@ let OWNER_EXISTS = null;
 let UI = loadUI();
 function loadUI(){ let u={}; try{ u=JSON.parse(localStorage.getItem(`acsp-ui-${CO}-${PORTAL}`)||'{}'); }catch(e){}
   return Object.assign({ptab:'jobs',ctab:'home',filter:'action',period:'month'}, u,
-    {q:'',sel:'',ed:{},confirm:'',busy:'',pick:{},authMode:'signin',creating:false,payM:{},rcpt:{},bell:false,modal:null,bk:null}); }
+    {q:'',sel:'',ed:{},confirm:'',busy:'',pick:{},authMode:PORTAL==='customer'?'welcome':'signin',creating:false,payM:{},rcpt:{},bell:false,modal:null,bk:null}); }
 function saveUI(){ try{ const {ptab,ctab,filter,period}=UI; localStorage.setItem(`acsp-ui-${CO}-${PORTAL}`,JSON.stringify({ptab,ctab,filter,period})); }catch(e){} }
 // Settings the admin controls for the customer and technician portals.
 const PCFG = () => {
@@ -318,7 +318,11 @@ function errMsg(e){
     'invalid-credential':'Email or password is incorrect.', 'wrong-password':'Email or password is incorrect.', 'user-not-found':'No account uses that email. Create one instead.',
     'email-already-in-use':'An account already uses that email. Sign in instead.', 'weak-password':'Use a password with at least 6 characters.',
     'invalid-email':'That email address is not valid.', 'popup-closed-by-user':'Google sign-in was closed before finishing.',
-    'too-many-requests':'Too many attempts. Wait a few minutes and try again.', 'unauthorized-domain':'This website is not allowed to sign in yet. Add its domain in Firebase → Authentication → Settings → Authorized domains.'
+    'too-many-requests':'Too many attempts. Wait a few minutes and try again.',
+    'operation-not-allowed':"Requests without an account aren't switched on yet. Please create an account, or call us.",
+    'admin-restricted-operation':"Requests without an account aren't switched on yet. Please create an account, or call us.",
+    'credential-already-in-use':'An account already uses that email. Sign in with it instead.', 'provider-already-linked':'This account already has a login.',
+    'requires-recent-login':'Please sign in again, then try once more.', 'unauthorized-domain':'This website is not allowed to sign in yet. Add its domain in Firebase → Authentication → Settings → Authorized domains.'
   };
   return M[c] || e?.message || 'Something went wrong. Try again.';
 }
@@ -741,7 +745,7 @@ function header(){
   return `<header class="top"><div class="top-in">
     <div class="brand">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
     ${PORTAL==='admin'?`<nav class="portal-links"><a href="${portalHref('customer')}" target="_blank" rel="noopener">Customer portal ↗</a><a href="${portalHref('technician')}" target="_blank" rel="noopener">Technician portal ↗</a></nav>`:''}
-    <div class="me">${bellButton()}<span class="avatar">${esc(initials(ME.profile?.name))}</span><div class="me-txt"><div style="font-weight:700;line-height:1.2">${esc(ME.profile?.name||'')}</div><span class="role-badge ${ME.role}">${ME.role==='provider'?'Office':ME.role==='technician'?'Technician':'Customer'}</span></div>
+    <div class="me">${bellButton()}<span class="avatar">${esc(initials(ME.profile?.name))}</span><div class="me-txt"><div style="font-weight:700;line-height:1.2">${esc(ME.profile?.name||(ME.user?.isAnonymous?'Guest':''))}</div><span class="role-badge ${ME.role}">${ME.role==='provider'?'Office':ME.role==='technician'?'Technician':'Customer'}</span></div>
     ${IN_APP?`<a class="btn sm" href="/app.html?switch=1">${APP_ROLE?'Company':'Switch'}</a>`:''}<button class="btn sm signout" data-act="signOut">Sign out</button></div>
   </div></header>`;
 }
@@ -784,11 +788,25 @@ const HERO = {
   technician:{h:'Your jobs for today, in one place.', items:['See assigned jobs, addresses and what the customer reported.','Start the trip and your location is shared until you arrive.','Write the work report when you finish.']},
   admin:{h:'Run the whole service desk from here.', items:['Schedule, quote, assign and invoice every request.','Create technician and customer accounts and control both portals.','Books update automatically from invoices and payments.']}
 };
+/* Customers can start without an account: they say what's wrong and where they are (a guest login on this
+   device keeps their requests). The page explains why an account is worth having. */
+const ACCOUNT_PERKS = ['Your services, quotations and invoices in one place','Service reports and a reminder when the next service is due','Your address saved, so booking again takes seconds','Use it on any phone or computer, not just this one'];
+function welcomeView(heroHTML){
+  const cfg=PCFG();
+  return `<div class="auth">${heroHTML}<section class="auth-form"><div class="auth-card welcome">
+      <h2>Need your AC checked?</h2><p class="muted">Tell us what's wrong and where you are. No account needed.</p>
+      <button class="btn coral lg block" data-act="guestStart">Request a service</button>
+      <div class="perks"><b>Or create a free account to keep track</b><ul>${ACCOUNT_PERKS.map(t=>`<li>${esc(t)}</li>`).join('')}</ul>
+        <div class="row">${cfg.customerSignup?'<button class="btn primary" data-act="authMode" data-v="signup">Create account</button>':''}<button class="btn" data-act="authMode" data-v="signin">Sign in</button></div></div>
+    </div>${coSwitchIcon()}</section></div>`;
+}
 function authView(){
   const m=UI.authMode, cfg=PCFG(), hero=HERO[PORTAL];
   const heroHTML=`<section class="auth-hero"><div class="brand" style="margin:0">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
     <h1>${hero.h}</h1><ul>${hero.items.map((t,i)=>`<li><i>${i+1}</i><span>${t}</span></li>`).join('')}</ul></section>`;
+  if(PORTAL==='customer' && (m==='welcome' || !m) && cfg.customerSignup) return welcomeView(heroHTML);
   const canSignup = (PORTAL==='customer' && cfg.customerSignup) || (PORTAL==='admin' && OWNER_EXISTS===false);
+  const back = PORTAL==='customer' && cfg.customerSignup ? `<button type="button" class="linkbtn" data-act="authMode" data-v="welcome">← Request a service without an account</button>` : '';
   const google = PORTAL!=='technician' && !IN_APP ? `<div class="or">or</div><button type="button" class="btn block" data-act="google">Continue with Google</button>` : '';
   let f='';
   if(m==='reset') f=`<form class="auth-card" data-form="reset"><h2>Reset your password</h2><p class="muted">We'll email you a link to choose a new password.</p>
@@ -802,13 +820,13 @@ function authView(){
     <label class="field"><span>Email</span><input id="au-email" name="email" type="email" autocomplete="email" required></label>
     <label class="field"><span>Password</span><input id="au-pass" name="password" type="password" autocomplete="new-password" minlength="6" required></label>
     <button class="btn primary block">${PORTAL==='admin'?'Create office account':'Create account'}</button>${google}
-    <p class="small muted">Already have an account? <button type="button" class="linkbtn" data-act="authMode" data-v="signin">Sign in</button></p></form>`;
+    <p class="small muted">Already have an account? <button type="button" class="linkbtn" data-act="authMode" data-v="signin">Sign in</button></p>${back}</form>`;
   else f=`<form class="auth-card" data-form="signin"><h2>Sign in</h2>
     ${PORTAL==='admin'&&OWNER_EXISTS===false?`<div class="notice">No office account exists yet. <button type="button" class="linkbtn" data-act="authMode" data-v="signup">Set up your business</button></div>`:''}
     <label class="field"><span>Email</span><input id="au-email" name="email" type="email" autocomplete="email" required></label>
     <label class="field"><span>Password</span><input id="au-pass" name="password" type="password" autocomplete="current-password" required></label>
     <button class="btn primary block">Sign in</button>${google}
-    <div class="row" style="justify-content:space-between">${PORTAL==='customer'? (cfg.customerSignup?`<button type="button" class="linkbtn" data-act="authMode" data-v="signup">Create an account</button>`:`<span class="small muted">New accounts are set up by the office${co().phone?' · '+esc(co().phone):''}</span>`) : PORTAL==='technician'?`<span class="small muted">Your login comes from the office.</span>`:'<span></span>'}<button type="button" class="linkbtn" data-act="authMode" data-v="reset">Forgot password?</button></div></form>`;
+    <div class="row" style="justify-content:space-between">${PORTAL==='customer'? (cfg.customerSignup?`<button type="button" class="linkbtn" data-act="authMode" data-v="signup">Create an account</button>`:`<span class="small muted">New accounts are set up by the office${co().phone?' · '+esc(co().phone):''}</span>`) : PORTAL==='technician'?`<span class="small muted">Your login comes from the office.</span>`:'<span></span>'}<button type="button" class="linkbtn" data-act="authMode" data-v="reset">Forgot password?</button></div>${back}</form>`;
   return `<div class="auth">${heroHTML}<section class="auth-form">${f}${coSwitchIcon()}</section></div>`;
 }
 function profileExtraFields(kind){
@@ -1329,7 +1347,38 @@ const ACT = {
   async verifiedContinue(){ try{ await ME.user.reload(); await ME.user.getIdToken(true); ME.user=auth.currentUser; }catch(e){}
     if(!auth.currentUser?.emailVerified) return toast("Your email isn't verified yet. Open the link in the email we sent.");
     ME.user=auth.currentUser; render(); },
-  async signOut(){ stopGPS(); clearTimeout(shellT); clearDeviceCopies();
+  async guestStart(el){ if(el) el.disabled=true; UI.creating=true; render();
+    const ok=await run(async()=>{
+      const u=ME.user?.isAnonymous ? ME.user : (await A.signInAnonymously(auth)).user;
+      ME.user=u;
+      if(!(await F.getDoc(d('users',u.uid))).exists()){
+        const b=F.writeBatch(db), at=nowISO();
+        b.set(d('users',u.uid), {name:'', email:'', phone:'', role:'customer', status:'active', guest:true, createdAt:at});
+        b.set(d('customers',u.uid), {name:'', phone:'', email:'', island:'', address:'', hasLogin:true, guest:true, createdAt:at});
+        await b.commit();
+      }
+      UI.ctab='book'; UI.bk=null; UI.sel=''; saveUI();
+    });
+    UI.creating=false; if(!ok) UI.authMode='signup'; render(); },
+  /** A guest keeps everything: the guest login gets an email and password (same account, same requests). */
+  async upgradeGuest(){
+    const email=val('ug-email').toLowerCase(), pass=document.getElementById('ug-pass')?.value||'', name=val('ug-name'), phone=val('ug-phone');
+    if(!name || !phone) return toast('Enter your name and mobile number.');
+    if(!email || pass.length<6) return toast('Enter your email and a password of at least 6 characters.');
+    await run(async()=>{
+      await A.linkWithCredential(ME.user, A.EmailAuthProvider.credential(email, pass));
+      await ME.user.getIdToken(true); ME.user=auth.currentUser;
+      const b=F.writeBatch(db);
+      b.update(d('users',ME.user.uid), {email, name, phone, guest:false});
+      b.set(d('customers',ME.user.uid), {email, name, phone, guest:false}, {merge:true});
+      await b.commit(); UI.upgrade=false;
+    }, 'Account created. Your services are saved to it.');
+    render(); },
+  upgradeOpen(){ UI.upgrade=true; UI.ctab='profile'; UI.sel=''; render(); scrollTo(0,0); },
+  async signOut(){
+    if(ME.user?.isAnonymous && UI.confirm!=='guestOut'){ UI.confirm='guestOut'; render(); return toast("You're a guest: signing out removes your requests from this device. Create an account first to keep them, or tap Sign out again."); }
+    UI.confirm=''; UI.authMode=PORTAL==='customer'?'welcome':'signin';
+    stopGPS(); clearTimeout(shellT); clearDeviceCopies();
     if(PUSH_TOKEN && ME.user){ try{ await F.updateDoc(d('users',ME.user.uid),{fcmTokens:F.arrayRemove(PUSH_TOKEN)}); }catch(e){} PUSH_TOKEN=null; }
     pushTried=null; await A.signOut(auth); },
   bell(){ UI.bell=!UI.bell; render(); },
@@ -1583,4 +1632,4 @@ function start(def){
   render();
 }
 
-export { ISSUES, recommendServices, CHECKS, CONDITION, reportSec, reportDoc, waLink, waNumber, addMonths, printReport, A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
+export { ACCOUNT_PERKS, ISSUES, recommendServices, CHECKS, CONDITION, reportSec, reportDoc, waLink, waNumber, addMonths, printReport, A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
