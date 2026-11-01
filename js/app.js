@@ -10,6 +10,9 @@ const ROLES = [
   {key:'admin', title:'Office', text:'Run the service desk for your company.'}
 ];
 const local = /^(localhost|127\.)/.test(location.hostname);
+// The Customer, Technician and Office apps each open one kind of portal; only the company code is asked.
+const LOCKED = (()=>{ let r=''; try{ r=window.AndroidApp?.role?.()||''; }catch(e){} r=r||new URLSearchParams(location.search).get('role')||''; return ROLES.some(x=>x.key===r)? r : ''; })();
+const SWITCHING = new URLSearchParams(location.search).get('switch')==='1';
 const pathFor = (co, role) => local ? `/${{customer:'index.html',technician:'tech.html',admin:'admin.html'}[role]}?c=${co}` : `/${co}${{customer:'',technician:'/tech',admin:'/admin'}[role]}`;
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const $ = s => document.querySelector(s);
@@ -23,6 +26,9 @@ async function firestore(){
 }
 const UI = { co:'', company:null, brand:null, error:'', busy:false };
 try { const s = JSON.parse(localStorage.getItem('acsp-app') || 'null'); if (s?.co) UI.co = s.co; } catch (e) {}
+const ROLE_TEXT = {customer:['Book and track your AC service','Book a service, follow your technician on the map, pay and rate.'],
+  technician:['Your jobs, in your pocket','Accept jobs, share your trip, and send service reports.'],
+  admin:['Run your service desk','Requests, technicians, invoices and accounts for your company.']};
 
 function mark(){
   if (UI.brand?.logo) return `<img class="mark logo" src="${esc(UI.brand.logo)}" alt="">`;
@@ -32,7 +38,7 @@ function render(){
   const heroStyle = UI.brand?.color ? ` style="background:linear-gradient(150deg,${esc(UI.brand.color)},${esc(UI.brand.color2||UI.brand.color)})"` : '';
   let right;
   if (!UI.company) right = `<form class="auth-card" data-form="code"><h2>Your company</h2>
-      <p class="muted">Enter the company code your service company gave you. You only do this once.</p>
+      <p class="muted">${LOCKED==='admin'?'Enter your company code (from the platform admin).':LOCKED==='technician'?'Enter the company code your office gave you.':'Enter the company code your service company gave you.'} You only do this once.</p>
       <label class="field"><span>Company code</span><input id="code" name="code" value="${esc(UI.co)}" placeholder="e.g. reefside" autocapitalize="none" autocomplete="off" required></label>
       ${UI.error?`<p class="small" style="color:var(--bad)">${esc(UI.error)}</p>`:''}
       <button class="btn primary block lg" ${UI.busy?'disabled':''}>${UI.busy?'Checking…':'Continue'}</button></form>`;
@@ -40,8 +46,8 @@ function render(){
       <div class="role-pick">${ROLES.map(r=>`<button class="role-opt" data-role="${r.key}"><b>${r.title}</b><span>${r.text}</span></button>`).join('')}</div>
       <button class="linkbtn" data-act="change">Use a different company</button></div>`;
   $('#app').innerHTML = `<div class="auth"><section class="auth-hero"${heroStyle}><div class="brand" style="margin:0">${mark()}<div><b>${esc(UI.company?.name||'AC Service')}</b><small>${UI.company?'Choose your portal':'Welcome'}</small></div></div>
-    <h1>${UI.company?'Nearly there.':'Air-conditioning service, in your pocket.'}</h1>
-    <p>${UI.company?'Pick how you use the app. You can switch later from the portal.':'Book and track services, take jobs and run the office, all in one app.'}</p></section>
+    <h1>${UI.company?'Nearly there.':LOCKED?ROLE_TEXT[LOCKED][0]:'Air-conditioning service, in your pocket.'}</h1>
+    <p>${UI.company?'Pick how you use the app. You can switch later from the portal.':LOCKED?ROLE_TEXT[LOCKED][1]:'Book and track services, take jobs and run the office, all in one app.'}</p></section>
     <section class="auth-form">${right}</section></div>`;
 }
 async function lookUp(code){
@@ -53,6 +59,7 @@ async function lookUp(code){
     if (t.data().status !== 'active') { UI.error = `${t.data().name || 'This company'} is unavailable at the moment.`; return; }
     const b = await F.getDoc(F.doc(d, 'tenants', code, 'company', 'brand')).catch(() => null);
     UI.co = code; UI.company = t.data(); UI.brand = b?.exists() ? b.data() : null;
+    if (LOCKED) return go(LOCKED);
   } catch (e) { UI.error = "Couldn't check the code. Check your internet connection and try again."; }
   finally { UI.busy = false; render(); }
 }
@@ -71,4 +78,5 @@ document.addEventListener('click', e => {
   if (e.target.closest('[data-act=change]')) { UI.company = null; UI.brand = null; UI.co = ''; try { window.AndroidApp?.setHome?.(''); } catch (e) {} render(); }
 });
 render();
-if (UI.co) lookUp(UI.co);
+// Changing company in a single-role app starts from the code; otherwise reopen the saved company.
+if (UI.co && !(LOCKED && SWITCHING)) lookUp(UI.co);
