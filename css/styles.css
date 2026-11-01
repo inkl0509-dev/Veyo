@@ -667,3 +667,9 @@ body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5
   body.print-report .report-doc{border:0;padding:0}
   body.print-report .pill{border:1px solid currentColor}
 }
+
+/* Change-company icon on the sign-in page */
+.auth-form{position:relative}
+.co-switch{position:absolute;top:14px;right:14px;width:40px;height:40px;display:grid;place-items:center;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--muted);z-index:2}
+.co-switch:hover,.co-switch:focus-visible{color:var(--lagoon);border-color:var(--lagoon)}
+.co-switch svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
