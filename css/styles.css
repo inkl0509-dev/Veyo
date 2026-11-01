@@ -673,3 +673,9 @@ body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5
 .co-switch{position:absolute;top:14px;right:14px;width:40px;height:40px;display:grid;place-items:center;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--muted);z-index:2}
 .co-switch:hover,.co-switch:focus-visible{color:var(--lagoon);border-color:var(--lagoon)}
 .co-switch svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+/* Booking: recommended service */
+.rec-box{display:flex;flex-direction:column;gap:3px;margin:12px 0 4px;padding:12px 14px;border-radius:var(--r-sm);background:var(--teal-soft);border:1px solid var(--line)}
+.rec-box b{color:var(--teal-text)}
+.rec-box span{font-size:.86rem;color:var(--muted)}
+.rec-pill{font-size:.66rem;padding:2px 8px;margin-left:6px;vertical-align:2px}
