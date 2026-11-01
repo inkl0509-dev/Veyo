@@ -683,3 +683,19 @@ body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5
 .reason-box b{font-size:.9rem}
 .reason-box ul{margin:4px 0 0;padding-left:20px;font-size:.88rem;color:var(--muted);display:flex;flex-direction:column;gap:2px}
 .reason-box .tech-check{margin:2px 0 0;padding-top:10px;border-top:1px solid var(--line);font-weight:600;color:var(--ink);font-size:.9rem}
+
+/* Guests and accounts */
+.auth-card.welcome{display:flex;flex-direction:column;gap:12px}
+.auth-card.welcome h2{margin:0}
+.perks{margin-top:10px;padding:16px;border-radius:var(--r);background:var(--surface-2);border:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+.perks ul,.perk-list,.guest-banner ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:.9rem}
+.perks li,.perk-list li,.guest-banner li{padding-left:24px;position:relative}
+.perks li::before,.perk-list li::before,.guest-banner li::before{content:"✓";position:absolute;left:2px;color:var(--teal-text);font-weight:800}
+.guest-banner{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;padding:16px;border-radius:var(--r);background:var(--mango-soft);border:1px solid var(--line)}
+.guest-banner>div{display:flex;flex-direction:column;gap:8px;min-width:0;flex:1 1 260px}
+.guest-banner span{color:var(--muted)}
+.guest-mini{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:12px 14px;border-radius:var(--r-sm);background:var(--mango-soft);font-size:.88rem}
+.issue-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.issue-tile{padding:14px;border-radius:var(--r);border:1px solid var(--line);background:var(--surface);color:var(--ink);font:700 .92rem var(--f-body);text-align:left;cursor:pointer;min-height:56px}
+.issue-tile:hover{border-color:var(--lagoon)}
+.upgrade-card{margin-bottom:16px;border:2px solid var(--mango)}
