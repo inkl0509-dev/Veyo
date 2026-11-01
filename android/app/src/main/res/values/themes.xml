@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The company's own colour replaces the status bar colour once its portal loads. -->
+    <style name="AppTheme" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/brand</item>
+        <item name="android:windowBackground">@color/surface</item>
+        <item name="android:colorAccent">@color/brand</item>
+    </style>
+</resources>

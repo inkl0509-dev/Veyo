@@ -1,0 +1,84 @@
+plugins {
+    id 'com.android.application'
+}
+// Push notifications need Firebase's google-services.json (see README). Without it the app still works,
+// just without phone notifications while it's closed.
+if (file('google-services.json').exists()) {
+    apply plugin: 'com.google.gms.google-services'
+}
+
+// Settings come from environment variables (GitHub Actions) or gradle properties, with defaults.
+def setting = { String key, String fallback -> (System.getenv(key) ?: project.findProperty(key) ?: fallback).toString() }
+// Your Vercel address. Change it here, in gradle.properties, or with the SITE_URL variable on GitHub.
+def siteUrl = setting('SITE_URL', 'https://veyo-two.vercel.app').replaceAll('/+$', '')
+def buildNumber = setting('GITHUB_RUN_NUMBER', '1').toInteger()
+
+android {
+    namespace 'mv.acservice.app'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 24
+        targetSdk 34
+        versionCode buildNumber
+        versionName "1.0.${buildNumber}"
+        buildConfigField 'String', 'SITE_URL', "\"${siteUrl}\""
+    }
+    buildFeatures { buildConfig true }
+
+    /* Three apps from one project. In Android Studio: Build Variants panel → customerDebug, techDebug or officeDebug.
+       Each has its own app ID, so all three can be installed on the same phone. */
+    flavorDimensions = ['role']
+    productFlavors {
+        customer {
+            dimension 'role'
+            applicationId setting('CUSTOMER_APP_ID', 'mv.acservice.customer')
+            resValue 'string', 'app_name', setting('CUSTOMER_APP_NAME', 'AC Service')
+            buildConfigField 'String', 'ROLE', '"customer"'
+        }
+        tech {
+            dimension 'role'
+            applicationId setting('TECH_APP_ID', 'mv.acservice.tech')
+            resValue 'string', 'app_name', setting('TECH_APP_NAME', 'AC Technician')
+            buildConfigField 'String', 'ROLE', '"technician"'
+        }
+        office {
+            dimension 'role'
+            applicationId setting('OFFICE_APP_ID', 'mv.acservice.office')
+            resValue 'string', 'app_name', setting('OFFICE_APP_NAME', 'AC Office')
+            buildConfigField 'String', 'ROLE', '"admin"'
+        }
+    }
+
+    signingConfigs {
+        release {
+            def ks = System.getenv('KEYSTORE_FILE')
+            if (ks) {
+                storeFile file(ks)
+                storePassword System.getenv('KEYSTORE_PASSWORD')
+                keyAlias System.getenv('KEY_ALIAS')
+                keyPassword System.getenv('KEY_PASSWORD')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (System.getenv('KEYSTORE_FILE')) signingConfig signingConfigs.release
+        }
+    }
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.13.1'
+    implementation platform('com.google.firebase:firebase-bom:33.1.2')
+    implementation 'com.google.firebase:firebase-messaging'
+}

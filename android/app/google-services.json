@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1077941044759",
+    "project_id": "veyo-36dbc",
+    "storage_bucket": "veyo-36dbc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1077941044759:android:2dfecbef5620c6cec9fe52",
+        "android_client_info": {
+          "package_name": "com.veyo.veyoservice"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDczftvYNGHLjK_YXcC3oaG80gK6MTaWvo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
