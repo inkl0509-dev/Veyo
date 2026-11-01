@@ -651,7 +651,9 @@ function saveShell(html){
 }
 // Remember this company so opening the site without a code (or the Home Screen app) comes straight back here.
 function rememberCompany(ok){ try{ if(ok) localStorage.setItem('acsp-co', CO); else if(localStorage.getItem('acsp-co')===CO) localStorage.removeItem('acsp-co'); }catch(e){} }
-const switchHref = () => `/${PORTAL_URL[PORTAL]}?switch=1`;
+const switchHref = () => IN_APP ? '/app.html?switch=1' : `/${PORTAL_URL[PORTAL]}?switch=1`;
+// Small corner button on the sign-in page for opening another company (the code is otherwise remembered).
+const coSwitchIcon = () => `<a class="co-switch" href="${switchHref()}" title="Change company" aria-label="Change company"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-5h6v5M9 10h.01M15 10h.01M9 13h.01M15 13h.01"/></svg></a>`;
 function clearDeviceCopies(){ try{ Object.keys(localStorage).filter(k=>k.startsWith(`acsp-shell-${CO}-`)||k.startsWith(`acsp-me-${CO}-`)).forEach(k=>localStorage.removeItem(k)); }catch(e){} }
 function findCompanyView(){
   return `<div class="auth"><section class="auth-hero"><div class="brand" style="margin:0">${markSVG()}<div><b>AC Service Portal</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
@@ -776,7 +778,7 @@ function authView(){
     <label class="field"><span>Password</span><input id="au-pass" name="password" type="password" autocomplete="current-password" required></label>
     <button class="btn primary block">Sign in</button>${google}
     <div class="row" style="justify-content:space-between">${PORTAL==='customer'? (cfg.customerSignup?`<button type="button" class="linkbtn" data-act="authMode" data-v="signup">Create an account</button>`:`<span class="small muted">New accounts are set up by the office${co().phone?' · '+esc(co().phone):''}</span>`) : PORTAL==='technician'?`<span class="small muted">Your login comes from the office.</span>`:'<span></span>'}<button type="button" class="linkbtn" data-act="authMode" data-v="reset">Forgot password?</button></div></form>`;
-  return `<div class="auth">${heroHTML}<section class="auth-form">${f}<p class="small muted" style="text-align:center;margin-top:14px">Not ${esc(brandName())}? <a href="${switchHref()}">Use a different company</a></p></section></div>`;
+  return `<div class="auth">${heroHTML}<section class="auth-form">${f}${coSwitchIcon()}</section></div>`;
 }
 function profileExtraFields(kind){
   if(kind==='owner') return `<p class="small muted">Use the email address you gave the platform admin for <b>${esc(brandName())}</b>.</p>`;
