@@ -295,12 +295,18 @@ function settingsView(){
         <div class="grid2"><label class="field"><span>Service</span><input id="sv-${s.id}-name" name="name" value="${esc(s.name)}" required></label>
         <label class="field"><span>Price (${CUR}, before GST)</span><input id="sv-${s.id}-price" name="price" type="number" min="0" step="0.01" value="${esc(s.price)}" required></label></div>
         <label class="field"><span>Description</span><input id="sv-${s.id}-desc" name="desc" value="${esc(s.desc||'')}"></label>
+        ${fixesField('sv-'+s.id, s.fixes)}
         <div class="row"><button class="btn sm">Save</button><button type="button" class="btn sm danger ${UI.confirm===k?'armed':''}" data-act="delSvc" data-id="${s.id}">${UI.confirm===k?'Tap again to delete':'Delete'}</button></div></form>`; }).join('')}
       <form class="callout mango" data-form="addSvc"><b>Add a service</b>
         <div class="grid2"><label class="field"><span>Service</span><input id="ns-name" name="name" placeholder="e.g. Gas top-up (R32)" required></label>
         <label class="field"><span>Price (${CUR}, before GST)</span><input id="ns-price" name="price" type="number" min="0" step="0.01" required></label></div>
         <label class="field"><span>Description</span><input id="ns-desc" name="desc"></label>
+        ${fixesField('ns', [])}
         <div><button class="btn primary sm">Add service</button></div></form></div></div></div>`;
+}
+// Which customer problems this service fixes: used to recommend it when a customer only says what's wrong.
+function fixesField(px, fixes){
+  return `<div class="field"><span>Recommend it when the customer says <small class="muted">(optional)</small></span><div class="row">${K.ISSUES.map((v,i)=>`<label class="row small" style="gap:6px"><input type="checkbox" id="${px}-fx${i}" name="fix" value="${esc(v)}" ${(fixes||[]).includes(v)?'checked':''}>${esc(v)}</label>`).join('')}</div></div>`;
 }
 
 /* ---------- admin actions ---------- */
@@ -339,8 +345,8 @@ const forms = {
     run(async()=>{ await F.setDoc(d('company','profile'),data,{merge:true});
       // Keep the name on the platform's company list in step.
       await F.updateDoc(tenantRef(),{name:data.name, updatedAt:nowISO()}).catch(e=>console.warn('company name',e)); }, 'Company details saved'); },
-  svc(f,dd){ run(()=>F.updateDoc(d('services',f.dataset.id),{name:dd.name, price:r2(dd.price), desc:dd.desc||''}), 'Service saved'); },
-  addSvc(f,dd){ run(async()=>{ await F.addDoc(c('services'),{name:dd.name,price:r2(dd.price),desc:dd.desc||''}); f.reset(); }, 'Service added'); },
+  svc(f,dd,fdata){ run(()=>F.updateDoc(d('services',f.dataset.id),{name:dd.name, price:r2(dd.price), desc:dd.desc||'', fixes:fdata.getAll('fix')}), 'Service saved'); },
+  addSvc(f,dd,fdata){ run(async()=>{ await F.addDoc(c('services'),{name:dd.name,price:r2(dd.price),desc:dd.desc||'', fixes:fdata.getAll('fix')}); f.reset(); }, 'Service added'); },
   portal(f,dd){ const windows={}; Object.keys(WINDOWS).forEach(k=>windows[k]=!!dd['w-'+k]);
     if(!Object.values(windows).some(Boolean)) return toast('Keep at least one booking time window.');
     const data={customerSignup:!!dd.customerSignup, customerCancel:!!dd.customerCancel, showTechPhone:!!dd.showTechPhone, techSeePrices:!!dd.techSeePrices,
