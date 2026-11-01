@@ -19,7 +19,7 @@ const ICON = {
 };
 const svg = (p, cls='') => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${p}</svg>`;
 const TABS = [['home','Home',ICON.home],['book','Book',ICON.plus],['jobs','My services',ICON.list],['profile','Profile',ICON.user]];
-const ISSUES = ['Not cooling','Water leaking','Strange noise','Bad smell','Not turning on','Ice on the unit','Remote not working','Regular service'];
+const ISSUES = K.ISSUES;
 const BK_STEPS = ['What you need','When & where','Check & send'];
 
 const firstName = () => String(myCustomer()?.name || ME.profile?.name || '').split(' ')[0];
@@ -194,7 +194,7 @@ function bookingDates(){
 function newBooking(svcId, from){
   const me=myCustomer()||{}, w=Object.keys(WINDOWS).filter(k=>PCFG().windows[k]), last=from||lastJob()||{};
   const svcs=from? (from.serviceIds||[]).filter(id=>sv(id)) : svcId? [svcId] : [];
-  return {step:from&&svcs.length?2:1, svcs, units:last.units||1, acType:last.acType||AC_TYPES[0], btu:last.btu||'Not sure', issues:[], note:'',
+  return {step:from&&svcs.length?2:1, svcs, svcTouched:svcs.length>0, units:last.units||1, acType:last.acType||AC_TYPES[0], btu:last.btu||'Not sure', issues:[], note:'',
     date:bookingDates()[PCFG().leadDays?0:1]||bookingDates()[0], window:w[0]||'morning', island:me.island||last.island||'', address:me.address||last.address||'',
     savePin:me.lat==null, editAddr:!(me.address||last.address)};
 }
@@ -217,11 +217,20 @@ function bookWizard(me){
   </section>`;
 }
 function chips(k, list, cur){ return `<div class="chips big">${list.map(v=>`<button class="chip" data-act="bkSet" data-k="${k}" data-v="${esc(v)}" aria-pressed="${cur===v}">${esc(v)}</button>`).join('')}</div>`; }
+/* Step 1: what's wrong first. Picking problems suggests (and ticks) the right service; customers who
+   aren't sure can leave the service empty and the technician checks it. */
 function bkNeed(b){
-  return `<h2>What do you need?</h2><p class="muted">Tap a service. You can pick more than one.</p>
-    <div class="svc-pick">${S.services.map((s,i)=>`<button class="svc-opt" data-act="bkSvc" data-id="${s.id}" aria-pressed="${b.svcs.includes(s.id)}"><span class="sicon c${i%5}"><svg viewBox="0 0 24 24">${SVC_ICONS[i%5]}</svg></span><span class="so-txt"><b>${esc(s.name)}</b><small>${esc(s.desc||'')}</small></span><span class="so-price">${money(s.price)}<small>per unit</small></span><span class="so-check" aria-hidden="true"></span></button>`).join('')}</div>
+  const rec=K.recommendServices(b.issues), recNames=rec.map(id=>sv(id)?.name).filter(Boolean);
+  const svcBtn=(s,i)=>`<button class="svc-opt" data-act="bkSvc" data-id="${s.id}" aria-pressed="${b.svcs.includes(s.id)}"><span class="sicon c${i%5}"><svg viewBox="0 0 24 24">${SVC_ICONS[i%5]}</svg></span><span class="so-txt"><b>${esc(s.name)}${rec.includes(s.id)?' <span class="pill teal rec-pill">Recommended</span>':''}</b><small>${esc(s.desc||'')}</small></span><span class="so-price">${money(s.price)}<small>per unit</small></span><span class="so-check" aria-hidden="true"></span></button>`;
+  const ordered=[...S.services.map((s,i)=>[s,i])].sort((a,c)=>(rec.includes(c[0].id)?1:0)-(rec.includes(a[0].id)?1:0));
+  return `<h2>What's wrong with your AC?</h2><p class="muted">Tap anything that fits. We'll suggest the right service.</p>
+    <div class="chips big">${ISSUES.map(v=>`<button class="chip" data-act="bkIssue" data-v="${esc(v)}" aria-pressed="${b.issues.includes(v)}">${esc(v)}</button>`).join('')}</div>
+    ${b.issues.length?(recNames.length?`<div class="rec-box"><b>We recommend: ${esc(recNames.join(' + '))}</b><span>${b.svcs.length?'Ticked below. Change it if you like, or':"You can tick it below, or"} leave it to us: the technician checks and the office confirms the price before any work.</span></div>`
+      :`<div class="rec-box"><b>No problem, our technician will check it.</b><span>You don't need to choose a service. The office confirms the price before any work.</span></div>`):''}
+    <div class="field"><span>Service <small class="muted">(${b.issues.length?'optional':'or pick one if you know'})</small></span>
+      <div class="svc-pick">${ordered.map(([s,i])=>svcBtn(s,i)).join('')}</div>
+      ${b.svcs.length&&b.issues.length?`<button class="linkbtn" data-act="bkNoSvc" style="margin-top:6px">Not sure: let the technician decide</button>`:''}</div>
     <div class="field"><span>How many AC units?</span><div class="stepper"><button data-act="bkUnits" data-d="-1" aria-label="Fewer units">−</button><b>${b.units}</b><button data-act="bkUnits" data-d="1" aria-label="More units">+</button></div></div>
-    <div class="field"><span>What's wrong? <small class="muted">(optional, pick any)</small></span><div class="chips big">${ISSUES.map(v=>`<button class="chip" data-act="bkIssue" data-v="${esc(v)}" aria-pressed="${b.issues.includes(v)}">${esc(v)}</button>`).join('')}</div></div>
     ${b.more?`<div class="field"><span>Type of AC</span>${chips('acType',AC_TYPES,b.acType)}</div>
       <div class="field"><span>Size <small class="muted">(on the sticker on the indoor unit)</small></span>${chips('btu',BTUS,b.btu)}<button class="linkbtn" data-act="btuHelp" style="margin-top:6px">Not sure? Work it out from the room size</button></div>
       <label class="field"><span>Anything else? <small class="muted">(optional)</small></span><textarea id="bk-note" data-bk="note" placeholder="e.g. The bedroom unit drips water at night">${esc(b.note)}</textarea></label>`
@@ -248,13 +257,14 @@ function bkReview(b){
   const est=estimate(b), w=WINDOWS[b.window]||'';
   const row=(l,v,step)=>`<div class="rv-row"><span class="label">${l}</span><b>${v}</b><button class="linkbtn" data-act="bkGo" data-v="${step}">Change</button></div>`;
   return `<h2>Check and send</h2><p class="muted">Nothing to pay now. We confirm the time and price first.</p>
-    <div class="rv">${row('Service',b.svcs.map(id=>esc(sv(id)?.name)).join(', '),1)}
+    <div class="rv">${row('Service',b.svcs.length?b.svcs.map(id=>esc(sv(id)?.name)).join(', '):'Not sure: the technician will check',1)}
       ${row('Your AC',`${b.units} × ${esc(b.acType)}, ${esc(b.btu)}`,1)}
       ${row('Problem',esc([...b.issues,b.note].filter(Boolean).join('. ')||'Not described'),1)}
       ${row('When',`${fd(b.date)}, ${esc(w.split(',')[0].toLowerCase())} (${esc(w.split(', ')[1]||'')})`,2)}
       ${row('Where',`${esc(b.address)}, ${esc(b.island)}${(UI.pick.book||pickDefault('home'))?' · pinned on map':''}`,2)}</div>
     ${est?`<div class="est-box"><div class="tot">${b.svcs.map(id=>`<span>${esc(sv(id)?.name)} × ${b.units}</span><span>${money((sv(id)?.price||0)*b.units)}</span>`).join('')}<span>GST ${est.rate}%</span><span>${money(est.gst)}</span><span class="grand">Estimated total</span><span class="grand">${money(est.total)}</span></div>
-      <p class="small muted">This is an estimate. The office confirms the final price in a quotation for you to approve before work starts.</p></div>`:''}`;
+      <p class="small muted">This is an estimate. The office confirms the final price in a quotation for you to approve before work starts.</p></div>`
+    :`<div class="est-box"><p class="small" style="margin:0">The price depends on what the technician finds. The office sends you a quotation to approve before any work starts.</p></div>`}`;
 }
 
 /* ---------- profile ---------- */
@@ -282,14 +292,18 @@ const actions = {
   jf(el){ UI.jf=el.dataset.v; render(); },
   pushLater(){ UI.pushLater=true; render(); },
   startBook(el){ UI.bk=newBooking(el.dataset.svc); UI.ctab='book'; UI.sel=''; saveUI(); render(); scrollTo(0,0); },
-  bkSvc(el){ const b=UI.bk, id=el.dataset.id; b.svcs = b.svcs.includes(id) ? b.svcs.filter(x=>x!==id) : [...b.svcs,id]; render(); },
+  bkSvc(el){ const b=UI.bk, id=el.dataset.id; b.svcTouched=true; b.svcs = b.svcs.includes(id) ? b.svcs.filter(x=>x!==id) : [...b.svcs,id]; render(); },
+  bkNoSvc(){ UI.bk.svcs=[]; UI.bk.svcTouched=true; render(); },
   bkSet(el){ UI.bk[el.dataset.k]=el.dataset.v; render(); },
-  bkIssue(el){ const b=UI.bk, v=el.dataset.v; b.issues = b.issues.includes(v) ? b.issues.filter(x=>x!==v) : [...b.issues,v]; render(); },
+  bkIssue(el){ const b=UI.bk, v=el.dataset.v; b.issues = b.issues.includes(v) ? b.issues.filter(x=>x!==v) : [...b.issues,v];
+    // Until the customer chooses services themselves, keep the recommended ones ticked.
+    if(!b.svcTouched) b.svcs=K.recommendServices(b.issues);
+    render(); },
   bkUnits(el){ UI.bk.units=Math.max(1,Math.min(30,UI.bk.units+(+el.dataset.d))); render(); },
   bkGo(el){ UI.bk.step=+el.dataset.v; render(); scrollTo(0,0); },
   bkBack(){ UI.bk.step=Math.max(1,UI.bk.step-1); render(); scrollTo(0,0); },
   bkNext(){ const b=UI.bk;
-    if(b.step===1 && !b.svcs.length) return toast('Tap the service you need.');
+    if(b.step===1 && !b.svcs.length && !b.issues.length && !String(b.note||'').trim()) return toast("Tap what's wrong, or the service you need.");
     if(b.step===2 && (!b.date || !b.window)) return toast('Choose a day and a time.');
     if(b.step===2 && b.date < bookingDates()[0]) return toast(`The earliest day you can book is ${fd(bookingDates()[0])}.`);
     if(b.step===2 && (!b.island.trim() || !b.address.trim())){ b.editAddr=true; render(); return toast('Enter your island and address.'); }
