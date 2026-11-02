@@ -1243,7 +1243,7 @@ function reportSec(j){
     ${r?`<p class="small muted">${(r.checks||[]).length} checks done${dT(r.readings)!=null?' · temperature drop '+dT(r.readings)+' °C':''}${r.nextService?' · next service '+fd(r.nextService):''}</p>`:'<p class="small muted">Add the checklist and readings so the customer gets a full report.</p>'}
     <div class="row">${r?`<button class="btn" data-act="viewReport" data-id="${j.id}">View</button>`:''}${canEdit?`<button class="btn" data-act="editReport" data-id="${j.id}">${r?'Edit':'Fill in report'}</button>`:''}
       ${r?`<button class="btn ${j.reportSentAt?'':'primary'}" data-act="sendReport" data-id="${j.id}">${j.reportSentAt?'Send again':'Send to customer'}</button>`:''}
-      ${r && j.customerPhone?`<a class="btn wa" href="${waLink(j)}" target="_blank" rel="noopener">WhatsApp</a>`:''}</div></div>`;
+      ${r?`<button class="btn wa" data-act="reportShare" data-fmt="pdf" data-id="${j.id}">Send PDF</button>`:''}</div></div>`;
 }
 function printReport(){
   document.body.classList.add('print-report');
@@ -1254,11 +1254,78 @@ function printReport(){
 
 /* ---------- invoice & payment ---------- */
 // Technicians only see whether the invoice is raised and whether it's paid, never an amount.
-/* Save to the device (print or PDF) and share on WhatsApp, for quotations and invoices.
-   Works for customers without the app: the office prints or sends the document itself. */
+/* ---------- PDF and image files of quotations, invoices and service reports ----------
+   Made on the device (html2canvas + jsPDF, loaded only when needed), then saved or handed to the
+   phone's share screen so it can go to WhatsApp as a real PDF or photo. The Android apps do the
+   sharing natively (AndroidApp.shareFile / saveFile) because Android's web view can't share files. */
+const PDF_LIBS=['https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js','https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'];
+let pdfLibsP=null, READY=null;
+function loadScript(src){ return new Promise((res,rej)=>{ const el=document.createElement('script'); el.src=src; el.crossOrigin='anonymous'; el.onload=res; el.onerror=()=>rej(new Error("Couldn't load the PDF maker. Check your internet connection.")); document.head.appendChild(el); }); }
+function pdfLibs(){ return pdfLibsP || (pdfLibsP=PDF_LIBS.reduce((p,u)=>p.then(()=>loadScript(u)), Promise.resolve()).catch(e=>{ pdfLibsP=null; throw e; })); }
+async function renderDoc(html){
+  await pdfLibs();
+  const box=document.createElement('div'); box.className='capture'; box.innerHTML=html; document.body.appendChild(box);
+  try{
+    try{ await document.fonts?.ready; }catch(e){}
+    await Promise.all([...box.querySelectorAll('img')].map(i=>i.complete?0:new Promise(r=>{ i.onload=i.onerror=r; })));
+    const w=box.offsetWidth, h=box.offsetHeight;
+    // Render the copy at the top-left of html2canvas's own sandbox (off-screen elements can come out blank).
+    return await window.html2canvas(box,{scale:2, backgroundColor:'#ffffff', useCORS:true, logging:false,
+      x:0, y:0, width:w, height:h, scrollX:0, scrollY:0, windowWidth:Math.max(w+40, 820), windowHeight:Math.max(h, 800),
+      onclone:(doc)=>{ const c=doc.querySelector('.capture'); if(c){ c.style.left='0px'; c.style.top='0px'; } }});
+  } finally { box.remove(); }
+}
+function canvasToPdf(cv){
+  const pdf=new window.jspdf.jsPDF({unit:'pt', format:'a4'});
+  const W=pdf.internal.pageSize.getWidth(), H=pdf.internal.pageSize.getHeight(), m=28, w=W-2*m, slice=Math.floor((H-2*m)*cv.width/w);
+  for(let y=0,i=0; y<cv.height; y+=slice,i++){
+    const h=Math.min(slice, cv.height-y), part=document.createElement('canvas'); part.width=cv.width; part.height=h;
+    const g=part.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,part.width,h); g.drawImage(cv,0,y,cv.width,h,0,0,cv.width,h);
+    if(i) pdf.addPage(); pdf.addImage(part.toDataURL('image/jpeg',0.92),'JPEG',m,m,w,h*w/cv.width);
+  }
+  return pdf.output('blob');
+}
+const toBase64 = blob => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result).split(',')[1]); r.onerror=rej; r.readAsDataURL(blob); });
+function download(blob, name){ const u=URL.createObjectURL(blob), a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u), 60000); }
+async function makeFile(html, name, fmt){
+  const cv=await renderDoc(html);
+  const blob = fmt==='pdf' ? canvasToPdf(cv) : await new Promise(r=>cv.toBlob(r,'image/jpeg',0.92));
+  const file = name.replace(/[^\w.-]+/g,'-') + (fmt==='pdf'?'.pdf':'.jpg');
+  return {blob, file, mime: fmt==='pdf'?'application/pdf':'image/jpeg'};
+}
+/** Save a PDF on this device. */
+async function saveDocFile(html, name){
+  toast('Making the PDF…');
+  const f=await makeFile(html, name, 'pdf');
+  if(window.AndroidApp?.saveFile){ window.AndroidApp.saveFile(await toBase64(f.blob), f.mime, f.file); return; }
+  download(f.blob, f.file); toast(`Saved ${f.file}`);
+}
+/** Send a PDF or photo: the phone's share screen (pick WhatsApp), or on a computer: save it, then open WhatsApp. */
+async function shareDocFile(html, name, fmt, text, phone){
+  toast(fmt==='pdf'?'Making the PDF…':'Making the image…');
+  const f=await makeFile(html, name, fmt);
+  if(window.AndroidApp?.shareFile){ window.AndroidApp.shareFile(await toBase64(f.blob), f.mime, f.file, text||''); return; }
+  const file=new File([f.blob], f.file, {type:f.mime});
+  if(navigator.canShare?.({files:[file]})){
+    try{ await navigator.share({files:[file], text}); }
+    catch(e){
+      if(e.name==='AbortError') return;
+      // Making the file took too long for the browser to allow sharing: one more tap shares it.
+      READY={file, text}; UI.modal={title:'Ready to send', html:`<p>${esc(f.file)} is ready.</p><div class="row"><button class="btn primary" data-act="shareReady">Share now</button></div>`}; render();
+    }
+    return;
+  }
+  download(f.blob, f.file);
+  if(phone){ window.open(`https://wa.me/${waNumber(phone)}?text=${encodeURIComponent(text||'')}`, '_blank', 'noopener'); toast('Saved. In WhatsApp, tap 📎 and attach '+f.file+'.'); }
+  else toast('Saved '+f.file+'. Attach it in WhatsApp.');
+}
+function docText(kind, D, j){ const C=co(); return `${C.name}: ${kind.toLowerCase()} ${D.no} for ${j.customerName||''}, total ${money(totals(D).total)}.`; }
 function docActions(kind, D, j){
-  const ph = ME.role!=='customer' && j.customerPhone;
-  return `<div class="row doc-acts no-print"><button class="btn sm" data-act="printDoc" data-kind="${kind}" data-id="${j.id}">⤓ Save PDF / Print</button>${ph?`<a class="btn sm wa" target="_blank" rel="noopener" href="${docWaLink(kind,D,j)}">WhatsApp to customer</a>`:''}</div>`;
+  const office = ME.role!=='customer';
+  return `<div class="row doc-acts no-print"><button class="btn sm" data-act="docSave" data-kind="${kind}" data-id="${j.id}">⤓ Save PDF</button>
+    <button class="btn sm ${office?'wa':''}" data-act="docShare" data-fmt="pdf" data-kind="${kind}" data-id="${j.id}">${office?'Send PDF':'Share PDF'}</button>
+    ${office?`<button class="btn sm wa" data-act="docShare" data-fmt="img" data-kind="${kind}" data-id="${j.id}">Send as photo</button>`:''}
+    <button class="btn sm" data-act="printDoc" data-kind="${kind}" data-id="${j.id}">View / print</button></div>`;
 }
 function docWaLink(kind, D, j){
   const C=co(), t=totals(D), paid=kind==='Invoice' && j.payment?.status==='paid';
@@ -1523,11 +1590,22 @@ const ACT = {
     run(async()=>{ await F.updateDoc(jobRef(j.id),{finishedAt:nowISO(), workNotes:notes, parts, report, loc:F.deleteField(), trail:F.deleteField()});
       await event(j,`Work finished by ${myName()}: ${notes}`,['customer','office'],'Service finished'); }, 'Job marked finished'); },
 
-  viewReport(el){ const j=job(el.dataset.id); UI.modal={title:`Service report ${j.no}`, wide:true, html:reportDoc(j)+`<div class="row no-print" style="margin-top:14px"><button class="btn primary" data-act="printReport">Print or save as PDF</button>${ME.role!=='customer'&&j.customerPhone&&j.report?`<a class="btn wa" href="${waLink(j)}" target="_blank" rel="noopener">WhatsApp to customer</a>`:''}</div>`}; render(); },
+  viewReport(el){ const j=job(el.dataset.id); pdfLibs().catch(()=>{});
+    UI.modal={title:`Service report ${j.no}`, wide:true, html:reportDoc(j)+`<div class="row no-print" style="margin-top:14px"><button class="btn primary" data-act="reportShare" data-fmt="save" data-id="${j.id}">⤓ Save PDF</button>
+      <button class="btn ${ME.role!=='customer'?'wa':''}" data-act="reportShare" data-fmt="pdf" data-id="${j.id}">${ME.role!=='customer'?'Send PDF':'Share PDF'}</button>${ME.role!=='customer'?`<button class="btn wa" data-act="reportShare" data-fmt="img" data-id="${j.id}">Send as photo</button>`:''}
+      <button class="btn" data-act="printReport">Print</button></div>`}; render(); },
   printReport(){ printReport(); },
   printDoc(el){ const j=job(el.dataset.id), kind=el.dataset.kind, D=kind==='Invoice'?j.invoice:j.quote; if(!D) return;
-    UI.modal={title:`${kind} ${D.no}`, wide:true, html:docView(kind,D,j)+`<div class="row no-print" style="margin-top:14px"><button class="btn primary" data-act="printReport">Save as PDF / Print</button>${ME.role!=='customer'&&j.customerPhone?`<a class="btn wa" target="_blank" rel="noopener" href="${docWaLink(kind,D,j)}">WhatsApp to customer</a>`:''}</div>
-      <p class="small muted no-print">In the print screen choose <b>Save as PDF</b> to keep it on this device.</p>`}; render(); },
+    pdfLibs().catch(()=>{});   // get the PDF maker ready while the document is on screen
+    UI.modal={title:`${kind} ${D.no}`, wide:true, html:docView(kind,D,j)+docActions(kind,D,j).replace('data-act="printDoc"','data-act="printReport"').replace('View / print','Print')}; render(); },
+  docSave(el){ const j=job(el.dataset.id), kind=el.dataset.kind, D=kind==='Invoice'?j.invoice:j.quote; if(!D) return;
+    saveDocFile(docView(kind,D,j), `${kind}-${D.no}`).catch(e=>toast(e.message||"Couldn't make the PDF.")); },
+  docShare(el){ const j=job(el.dataset.id), kind=el.dataset.kind, D=kind==='Invoice'?j.invoice:j.quote; if(!D) return;
+    shareDocFile(docView(kind,D,j), `${kind}-${D.no}`, el.dataset.fmt, docText(kind,D,j), ME.role!=='customer'?j.customerPhone:'').catch(e=>toast(e.message||"Couldn't make the file.")); },
+  reportShare(el){ const j=job(el.dataset.id); if(!j?.report) return;
+    const fmt=el.dataset.fmt, html=reportDoc(j), name=`Service-report-${j.no}`;
+    (fmt==='save' ? saveDocFile(html, name) : shareDocFile(html, name, fmt, `${co().name}: service report for ${j.no}.`, ME.role!=='customer'?j.customerPhone:'')).catch(e=>toast(e.message||"Couldn't make the file.")); },
+  async shareReady(){ const r=READY; READY=null; UI.modal=null; render(); if(!r) return; try{ await navigator.share({files:[r.file], text:r.text}); }catch(e){} },
   officeQuote(el){ const j=job(el.dataset.id), v=el.dataset.v;
     run(async()=>{ await F.updateDoc(jobRef(j.id),{quote:{...j.quote, status:v, respondedAt:nowISO(), recordedBy:myName()}});
       await log(j.id, `Quotation ${j.quote.no} ${v} by the customer (recorded by ${myName()})`); }, v==='accepted'?'Marked as accepted':'Marked as declined'); },
