@@ -226,7 +226,9 @@ const tech = id => S.techs.find(x=>x.id===id);
 const job = id => S.jobs.find(x=>x.id===id) || (S.openJobs||[]).find(x=>x.id===id);
 // A job sent to one technician waits for them to accept it. Older jobs without assignStatus count as accepted.
 const accepted = j => !!j.techId && (j.assignStatus||'accepted')==='accepted';
-const jobTitle = j => (j.serviceIds||[]).map(id=>sv(id)?.name).filter(Boolean).join(', ') || (j.issue ? 'AC check-up' : 'AC service');
+const jobTitle = j => (j.serviceIds||[]).map(id=>sv(id)?.name).filter(Boolean).join(', ') || docTitle(j) || (j.issue ? 'AC check-up' : 'AC service');
+// Quotations and invoices made directly by the office are named after their first line.
+function docTitle(j){ const D=j.direct && (j.invoice||j.quote); if(!D?.lines?.length) return ''; return D.lines[0].desc + (D.lines.length>1?` +${D.lines.length-1} more`:''); }
 
 /* ---------- problems → services ----------
    Customers can say what's wrong instead of picking a service. Each service can list the problems it fixes
@@ -291,7 +293,7 @@ function hint(j){
   if(s==='requested') return 'Confirm a time';
   if(s==='declined') return 'Revise the quotation';
   if(s==='scheduled') return 'Send a quote or assign';
-  if(s==='approved') return 'Assign a technician';
+  if(s==='approved') return j.direct ? 'Create the invoice' : 'Assign a technician';
   if(s==='completed') return 'Send the invoice';
   if(s==='invoiced' && j.payment?.status==='pending') return 'Confirm payment received';
   if(s==='paid' && j.payment?.verified===false) return 'Verify bank transfer';
@@ -920,7 +922,10 @@ function quoteSec(j){
   if(role==='technician') return '';   // technicians never see prices
   let h=`<div class="sec"><div class="sec-h"><h3>Quotation</h3>${Q?`<span class="pill ${Q.status==='accepted'?'teal':Q.status==='declined'?'bad':'orchid'}">${Q.status==='accepted'?'Accepted':Q.status==='declined'?'Declined':'Awaiting customer'}</span>`:''}</div>`;
   const editable=role==='provider' && !j.finishedAt && !j.cancelled && (!Q || Q.status!=='accepted');
-  if(Q) h+= role==='customer' ? docFold('Quotation',Q,j,Q.status==='sent') : docView('Quotation',Q,j);
+  if(Q) h+= role==='customer' ? docFold('Quotation',Q,j,Q.status==='sent') : docView('Quotation',Q,j)+docActions('Quotation',Q,j);
+  // Customers without the app answer by phone or in person: the office records it.
+  if(role==='provider' && Q?.status==='sent') h+=`<div class="callout"><b>Customer's answer</b><p class="small">If they replied by phone, WhatsApp or in person, record it here.</p>
+    <div class="row"><button class="btn teal sm" data-act="officeQuote" data-v="accepted" data-id="${j.id}">Customer accepted</button><button class="btn sm" data-act="officeQuote" data-v="declined" data-id="${j.id}">Customer declined</button></div></div>`;
   if(Q?.status==='declined' && Q.reason) h+=`<div class="callout coral"><span class="label">Customer's reason</span><p>${esc(Q.reason)}</p></div>`;
   if(role==='customer' && Q?.status==='sent') h+=`<div class="callout"><b>Do you approve this quotation?</b>
       <label class="field"><span>Message to the office (optional)</span><textarea id="qr-${j.id}" placeholder="Anything you want to change or ask"></textarea></label>
@@ -1249,9 +1254,22 @@ function printReport(){
 
 /* ---------- invoice & payment ---------- */
 // Technicians only see whether the invoice is raised and whether it's paid, never an amount.
+/* Save to the device (print or PDF) and share on WhatsApp, for quotations and invoices.
+   Works for customers without the app: the office prints or sends the document itself. */
+function docActions(kind, D, j){
+  const ph = ME.role!=='customer' && j.customerPhone;
+  return `<div class="row doc-acts no-print"><button class="btn sm" data-act="printDoc" data-kind="${kind}" data-id="${j.id}">⤓ Save PDF / Print</button>${ph?`<a class="btn sm wa" target="_blank" rel="noopener" href="${docWaLink(kind,D,j)}">WhatsApp to customer</a>`:''}</div>`;
+}
+function docWaLink(kind, D, j){
+  const C=co(), t=totals(D), paid=kind==='Invoice' && j.payment?.status==='paid';
+  const text=`${C.name}\n${kind} ${D.no} for ${j.customerName||''}\n`+(D.lines||[]).map(l=>`• ${l.desc} × ${l.qty}: ${money((+l.qty||0)*(+l.rate||0))}`).join('\n')+
+    `\n${t.disc?'Discount: -'+money(t.disc)+'\n':''}GST ${t.rate}%: ${money(t.gst)}\nTotal: ${money(t.total)}`+
+    (kind==='Invoice'? (paid?`\nPAID ${fd(j.payment.paidAt)}. Thank you!`:`\nDue ${fd(D.dueDate)}.${(D.methods||[]).includes('bml')&&C.bml?' BML '+C.bml+'.':''}${(D.methods||[]).includes('mib')&&C.mib?' MIB '+C.mib+'.':''} Reference ${j.no}.`) : `\nValid until ${fd(D.validUntil)}. Reply to accept.`);
+  return `https://wa.me/${waNumber(j.customerPhone)}?text=${encodeURIComponent(text)}`;
+}
 // Customers see the total and open the full document only if they want it.
 function docFold(kind, D, j, open){
-  return `<details class="doc-fold"${open?' open':''}><summary><span>${kind} <span class="mono">${esc(D.no||'')}</span><small>${open?'Tap to hide':'Tap to see the full '+kind.toLowerCase()}</small></span><b>${money(totals(D).total)}</b></summary>${docView(kind,D,j)}</details>`;
+  return `<details class="doc-fold"${open?' open':''}><summary><span>${kind} <span class="mono">${esc(D.no||'')}</span><small>${open?'Tap to hide':'Tap to see the full '+kind.toLowerCase()}</small></span><b>${money(totals(D).total)}</b></summary>${docView(kind,D,j)}${docActions(kind,D,j)}</details>`;
 }
 function techInvoiceSec(j){
   const I=j.invoice, P=j.payment;
@@ -1264,7 +1282,7 @@ function invoiceSec(j){
   const role=ME.role, I=j.invoice, P=j.payment, C=co();
   if(role==='technician') return techInvoiceSec(j);
   if(!I && role!=='provider') return j.finishedAt? `<div class="sec"><h3>Invoice</h3><p class="muted">The invoice will appear here once the office sends it.</p></div>` : '';
-  if(!I && !j.finishedAt) return '';
+  if(!I && !j.finishedAt && !j.direct) return '';
   let h=`<div class="sec"><div class="sec-h"><h3>Invoice</h3>${I?pill(j):''}</div>`;
   if(!I){
     const key='i-'+j.id;
@@ -1277,7 +1295,7 @@ function invoiceSec(j){
       <div class="row"><button class="btn primary" data-act="sendInvoice" data-id="${j.id}">Send invoice</button><span class="small muted">Sending posts the sale, GST and the amount owed to Accounting.</span></div></div>`;
     return h+`</div>`;
   }
-  h+= role==='customer' ? docFold('Invoice',I,j,false) : docView('Invoice',I,j);
+  h+= role==='customer' ? docFold('Invoice',I,j,false) : docView('Invoice',I,j)+docActions('Invoice',I,j);
   if(P?.status==='paid'){
     h+=`<div class="callout teal"><b>Paid ${money(P.amount)} by ${METHODS[P.method]?.n||P.method}</b><p class="small">${fdt(P.paidAt)}${P.ref?' · Reference '+esc(P.ref):''}</p>`;
     h+=receiptLine(j);
@@ -1288,7 +1306,7 @@ function invoiceSec(j){
     h+=`<div class="callout coral"><b>${METHODS[P.method]?.n} payment of ${money(I.total)} to collect</b><p class="small">The customer chose this ${fdt(P.requestedAt)}.</p>${receiptLine(j)}${role==='provider'?`<div class="row"><button class="btn coral" data-act="confirmPay" data-id="${j.id}">Confirm ${METHODS[P.method]?.n.toLowerCase()} received</button></div>`:''}</div>`;
   } else if(role==='customer') h+=payPanel(j);
   if(role==='customer' && P && !j.receipt) h+=`<div class="callout"><b>Add your payment receipt</b><p class="small">Optional. It helps the office confirm your payment faster.</p>${receiptPicker(j)}${UI.rcpt[j.id]?`<div><button class="btn teal" data-act="uploadReceipt" data-id="${j.id}">Send receipt</button></div>`:''}</div>`;
-  else if(role==='provider') h+=`<details class="callout"><summary><b>Record a payment received another way</b></summary>
+  else if(role==='provider') h+=`<details class="callout"><summary><b>Record payment received</b> <span class="small muted">(cash, bank transfer or card: posts to Accounting)</span></summary>
       <div class="grid3" style="margin-top:10px"><label class="field"><span>Method</span><select id="rp-m-${j.id}">${Object.entries(METHODS).map(([k,m])=>`<option value="${k}">${m.n}</option>`).join('')}</select></label>
       <label class="field"><span>Reference</span><input id="rp-r-${j.id}" placeholder="Transfer or receipt no."></label></div>
       <div class="row" style="margin-top:10px"><button class="btn" data-act="recordPay" data-id="${j.id}">Record ${money(I.total)} received</button></div></details>`;
@@ -1507,6 +1525,12 @@ const ACT = {
 
   viewReport(el){ const j=job(el.dataset.id); UI.modal={title:`Service report ${j.no}`, wide:true, html:reportDoc(j)+`<div class="row no-print" style="margin-top:14px"><button class="btn primary" data-act="printReport">Print or save as PDF</button>${ME.role!=='customer'&&j.customerPhone&&j.report?`<a class="btn wa" href="${waLink(j)}" target="_blank" rel="noopener">WhatsApp to customer</a>`:''}</div>`}; render(); },
   printReport(){ printReport(); },
+  printDoc(el){ const j=job(el.dataset.id), kind=el.dataset.kind, D=kind==='Invoice'?j.invoice:j.quote; if(!D) return;
+    UI.modal={title:`${kind} ${D.no}`, wide:true, html:docView(kind,D,j)+`<div class="row no-print" style="margin-top:14px"><button class="btn primary" data-act="printReport">Save as PDF / Print</button>${ME.role!=='customer'&&j.customerPhone?`<a class="btn wa" target="_blank" rel="noopener" href="${docWaLink(kind,D,j)}">WhatsApp to customer</a>`:''}</div>
+      <p class="small muted no-print">In the print screen choose <b>Save as PDF</b> to keep it on this device.</p>`}; render(); },
+  officeQuote(el){ const j=job(el.dataset.id), v=el.dataset.v;
+    run(async()=>{ await F.updateDoc(jobRef(j.id),{quote:{...j.quote, status:v, respondedAt:nowISO(), recordedBy:myName()}});
+      await log(j.id, `Quotation ${j.quote.no} ${v} by the customer (recorded by ${myName()})`); }, v==='accepted'?'Marked as accepted':'Marked as declined'); },
   editReport(el){ const j=job(el.dataset.id); UI.modal={title:`Service report ${j.no}`, html:reportForm(j,'re-'+j.id)+`<div class="row"><button class="btn primary" data-act="saveReport" data-id="${j.id}">Save report</button></div>`}; render(); },
   saveReport(el){ const j=job(el.dataset.id), {notes, parts, report}=readReportForm(j, 're-'+j.id);
     if(!notes) return toast('Describe the work done.');
