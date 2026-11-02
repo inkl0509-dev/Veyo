@@ -138,6 +138,17 @@ function quickDocForm(){
       <span class="small muted">${inv?'Posts the sale, GST and the amount owed to Accounting.':'You can turn it into an invoice later.'} Then save it as a PDF or send it on WhatsApp.</span></div></div></div>`;
 }
 
+/* Deletes the login everywhere (the sign-in account too, so the email can be used again).
+   Without the manageLogin function it falls back to pausing, and says how to finish. */
+async function deleteLogin(uid, fallback, who){
+  try{ const r=await K.callAdmin('delete', {uid});
+    toast(r.authDeleted ? `${who} deleted, including the sign-in. The email can be used again.` : `${who} removed from your company. The sign-in is kept because it's also used in another company.`); }
+  catch(e){
+    if(!e.fnMissing) return toast(K.errMsg(e));
+    try{ await fallback(); toast(`${who} removed and paused. To delete the sign-in too, deploy the manageLogin function (README), or delete it in Firebase → Authentication → Users.`); }
+    catch(e2){ toast(K.errMsg(e2)); }
+  }
+}
 /* ---------- customers ---------- */
 function userOf(id){ return S.users.find(u=>u.id===id); }
 function statusPill(u){ return !u? '<span class="pill mute">No login</span>' : (u.status||'active')==='active'? '<span class="pill teal">Active</span>' : '<span class="pill bad">Paused</span>'; }
@@ -148,7 +159,7 @@ function customersView(){
     <div class="card"><div class="card-h"><h2>Customers</h2><input id="cust-q" type="search" placeholder="Search" value="${esc(UI.cq||'')}" data-input="cq" style="max-width:220px" aria-label="Search customers"></div>
     ${rows.length?`<div class="tscroll"><table class="t"><thead><tr><th>Name</th><th>Contact</th><th>Address</th><th>Portal login</th><th class="r">Requests</th><th class="r">Outstanding</th><th></th></tr></thead><tbody>
     ${rows.map(({cu,u,n,due})=>`<tr><td><b>${esc(cu.name||'(no name yet)')}</b>${cu.guest?' <span class="pill mango" title="Booked without an account; their requests stay on their phone until they create one">Guest</span>':''}</td><td>${esc(cu.phone)}<br><span class="small muted">${esc(cu.email||'')}</span></td><td>${esc(cu.address)}${cu.island?', '+esc(cu.island):''}</td><td>${statusPill(u)}</td><td class="r">${n}</td><td class="r" style="${due?'color:var(--coral-text);font-weight:800':''}">${money(due)}</td>
-      <td><div class="row" style="flex-wrap:nowrap"><button class="btn sm" data-act="newJob" data-id="${cu.id}">Book</button>${u?`<button class="btn sm" data-act="toggleUser" data-id="${cu.id}">${(u.status||'active')==='active'?'Pause':'Activate'}</button>`:''}</div></td></tr>`).join('')}
+      <td><div class="row" style="flex-wrap:nowrap"><button class="btn sm" data-act="newJob" data-id="${cu.id}">Book</button>${u?`<button class="btn sm" data-act="toggleUser" data-id="${cu.id}">${(u.status||'active')==='active'?'Pause':'Activate'}</button><button class="btn sm danger ${UI.confirm==='dellogin'+cu.id?'armed':''}" data-act="delLogin" data-who="Customer login" data-id="${cu.id}" title="Deletes the login; their requests and invoices stay">${UI.confirm==='dellogin'+cu.id?'Tap again':'Delete login'}</button>`:''}</div></td></tr>`).join('')}
     </tbody></table></div>`:`<div class="empty"><h3>No customers yet</h3><p>Customers appear here when they sign up on the customer portal, or when you add them.</p></div>`}</div>
     <form class="card" data-form="addCustomer"><div class="card-h"><h3>Add a customer</h3></div><div class="card-b stack">
       <label class="field"><span>Name</span><input id="nc-name" name="name" required></label>
@@ -170,7 +181,7 @@ function teamView(){
         <p class="small">${esc(t.skills||'')}</p>
         <div class="row small">${!active?'<span class="pill bad">Paused</span>':act?`<span class="pill live">${act.arrivedAt?'On site':'On the way'} · ${esc(act.no)}</span>`:'<span class="pill teal">Available</span>'}<span class="muted">${done} jobs done</span>${ar?stars(ar.avg)+` <span class="muted">${ar.avg.toFixed(1)} (${ar.n})</span>`:''}</div>
         <div class="row"><button class="btn sm" data-act="toggleUser" data-id="${t.id}">${active?'Pause login':'Activate login'}</button><button class="btn sm" data-act="resetPw" data-email="${esc(t.email||'')}">Send password reset</button>
-        <button class="btn sm danger ${UI.confirm===k?'armed':''}" data-act="removeTech" data-id="${t.id}">${UI.confirm===k?'Tap again to remove':'Remove'}</button></div></div>`; }).join('')}
+        <button class="btn sm danger ${UI.confirm===k?'armed':''}" data-act="removeTech" data-id="${t.id}">${UI.confirm===k?'Tap again to delete':'Delete'}</button></div></div>`; }).join('')}
       <form class="person" data-form="addStaff" data-role="technician"><h3>Create a technician login</h3>
         <label class="field"><span>Name</span><input id="nt-name" name="name" required></label>
         <label class="field"><span>Mobile</span><input id="nt-phone" name="phone"></label>
@@ -181,7 +192,7 @@ function teamView(){
         <div><button class="btn primary">Create technician</button></div></form></div>
     <h2 style="margin-top:12px">Office staff</h2>
     <div class="people">${staff.map(u=>`<div class="person"><div class="row"><span class="avatar">${initials(u.name)}</span><div style="min-width:0"><b>${esc(u.name)}</b><p class="small muted">${esc(u.email)}</p></div></div>
-        <div class="row">${statusPill(u)}${u.id===ME.user.uid?'<span class="small muted">You</span>':`<button class="btn sm" data-act="toggleUser" data-id="${u.id}">${(u.status||'active')==='active'?'Pause login':'Activate login'}</button>`}</div></div>`).join('')}
+        <div class="row">${statusPill(u)}${u.id===ME.user.uid?'<span class="small muted">You</span>':`<button class="btn sm" data-act="toggleUser" data-id="${u.id}">${(u.status||'active')==='active'?'Pause login':'Activate login'}</button><button class="btn sm danger ${UI.confirm==='dellogin'+u.id?'armed':''}" data-act="delLogin" data-who="Office login" data-id="${u.id}">${UI.confirm==='dellogin'+u.id?'Tap again to delete':'Delete'}</button>`}</div></div>`).join('')}
       <form class="person" data-form="addStaff" data-role="provider"><h3>Add office staff</h3>
         <p class="small muted">Staff get full access to this admin portal.</p>
         <label class="field"><span>Name</span><input id="ns-sname" name="name" required></label>
@@ -407,7 +418,9 @@ const actions = {
   resetPw(el){ if(!el.dataset.email) return toast('No email on file.'); run(()=>K.sendReset(el.dataset.email), 'Password reset email sent'); },
   delSvc(el){ const id=el.dataset.id, k='delsvc'+id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm=''; run(()=>F.deleteDoc(d('services',id)), 'Service deleted'); },
   removeTech(el){ const id=el.dataset.id, k='deltech'+id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
-    run(async()=>{ const b=F.writeBatch(db); b.delete(d('techs',id)); if(userOf(id)) b.update(d('users',id),{status:'paused'}); await b.commit(); }, 'Technician removed and their login paused'); }
+    deleteLogin(id, async()=>{ const b=F.writeBatch(db); b.delete(d('techs',id)); if(userOf(id)) b.update(d('users',id),{status:'paused'}); await b.commit(); }, 'Technician'); },
+  delLogin(el){ const id=el.dataset.id, k='dellogin'+id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
+    deleteLogin(id, ()=>F.updateDoc(d('users',id),{status:'paused'}), el.dataset.who||'Login'); }
 };
 
 const forms = {
