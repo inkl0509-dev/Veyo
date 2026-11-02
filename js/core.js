@@ -653,7 +653,27 @@ async function createProfile(dd, kind){
 async function createLogin(email, password){
   const sec = appMod.initializeApp(firebaseConfig, 'creator-' + Date.now());
   try{ const sa=A.getAuth(sec); const cr=await A.createUserWithEmailAndPassword(sa, email, password); await A.signOut(sa); return cr.user.uid; }
+  catch(e){
+    if(!String(e?.code).includes('email-already-in-use')) throw e;
+    // Left over from a login that was deleted before: the manageLogin function can reuse it.
+    try{ return (await callAdmin('create', {email, password})).uid; }
+    catch(err){ if(err.fnMissing) throw {message:`${email} already has a login, maybe from before. Deploy the manageLogin function (README) to reuse it, or delete it in Firebase console → Authentication → Users.`}; throw err; }
+  }
   finally{ appMod.deleteApp(sec).catch(()=>{}); }
+}
+/* Office-only actions that need Firebase's admin rights (the manageLogin Cloud Function, Blaze plan):
+   delete a login completely, or reuse an email whose login was deleted before. */
+let fnMod=null;
+async function callAdmin(action, data){
+  const M = fnMod || (fnMod = await import(FB+'firebase-functions.js'));
+  const fn = M.httpsCallable(M.getFunctions(fbApp, SETTINGS.functionsRegion || 'asia-south1'), 'manageLogin');
+  try{ return (await fn({action, co:CO, ...data})).data; }
+  catch(e){
+    const c=String(e?.code||'');
+    // Not deployed (or no Blaze plan): Firebase answers "not found" / "internal" without our own message.
+    if(c==='functions/internal' || c==='functions/unavailable' || (c==='functions/not-found' && !/company|login/i.test(e.message||''))) e.fnMissing=true;
+    throw e;
+  }
 }
 
 /* ---------- render ---------- */
@@ -1287,21 +1307,38 @@ function canvasToPdf(cv){
 }
 const toBase64 = blob => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result).split(',')[1]); r.onerror=rej; r.readAsDataURL(blob); });
 function download(blob, name){ const u=URL.createObjectURL(blob), a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u), 60000); }
+const withTimeout = (p, ms, msg) => Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error(msg)), ms))]);
+// Android's web view can't download files: the app saves them itself (AndroidApp.saveFile). An app built
+// before that existed only has print, which can also save a PDF.
+const WEBVIEW = IN_APP || /; wv\)/.test(navigator.userAgent);
+const oldApp = () => WEBVIEW && !window.AndroidApp?.saveFile;
+function printFallback(html, title){
+  UI.modal={title, wide:true, html:html+`<p class="small muted no-print" style="margin-top:12px">In the print screen choose <b>Save as PDF</b>.${IN_APP?' Update the app (rebuild it) to save and send PDFs directly.':''}</p>`}; render();
+  setTimeout(()=>printReport(), 300);
+}
 async function makeFile(html, name, fmt){
-  const cv=await renderDoc(html);
+  const cv=await withTimeout(renderDoc(html), 30000, "Making the file took too long. Check your internet connection and try again.");
   const blob = fmt==='pdf' ? canvasToPdf(cv) : await new Promise(r=>cv.toBlob(r,'image/jpeg',0.92));
   const file = name.replace(/[^\w.-]+/g,'-') + (fmt==='pdf'?'.pdf':'.jpg');
   return {blob, file, mime: fmt==='pdf'?'application/pdf':'image/jpeg'};
 }
 /** Save a PDF on this device. */
 async function saveDocFile(html, name){
+  if(oldApp()) return printFallback(html, name.replace(/-/g,' '));
   toast('Making the PDF…');
   const f=await makeFile(html, name, 'pdf');
   if(window.AndroidApp?.saveFile){ window.AndroidApp.saveFile(await toBase64(f.blob), f.mime, f.file); return; }
-  download(f.blob, f.file); toast(`Saved ${f.file}`);
+  download(f.blob, f.file); afterDownload(f);
+}
+// Some browsers (and apps that open links inside themselves) block downloads: offer to open the file instead.
+function afterDownload(f){
+  const u=URL.createObjectURL(f.blob);
+  UI.modal={title:'Saved', html:`<p><b>${esc(f.file)}</b> was saved to your downloads.</p><p class="small muted">Not there? Open it, then use your browser's Share or Save.</p>
+    <div class="row"><a class="btn primary" href="${u}" target="_blank" rel="noopener">Open ${f.mime==='application/pdf'?'PDF':'image'}</a><button class="btn" data-act="modalClose">Done</button></div>`}; render();
 }
 /** Send a PDF or photo: the phone's share screen (pick WhatsApp), or on a computer: save it, then open WhatsApp. */
 async function shareDocFile(html, name, fmt, text, phone){
+  if(oldApp()) return printFallback(html, name.replace(/-/g,' '));
   toast(fmt==='pdf'?'Making the PDF…':'Making the image…');
   const f=await makeFile(html, name, fmt);
   if(window.AndroidApp?.shareFile){ window.AndroidApp.shareFile(await toBase64(f.blob), f.mime, f.file, text||''); return; }
@@ -1687,7 +1724,13 @@ const FORMS = {
     const ok=await run(async()=>{
       let cr;
       try{ cr=await A.createUserWithEmailAndPassword(auth, dd.email, dd.password); }
-      catch(e){ if(String(e?.code).includes('email-already-in-use')) throw {message:`You already have an account with this email, perhaps with another company. Sign in with that password to ${kind==='owner'?'set up':'join'} ${brandName()}.`}; throw e; }
+      catch(e){
+        if(!String(e?.code).includes('email-already-in-use')) throw e;
+        // The email already has a login (an old account, or another company): if the password matches, use it.
+        try{ cr=await A.signInWithEmailAndPassword(auth, dd.email, dd.password); }
+        catch(e2){ throw {message:`This email already has a login. Sign in with its password, or tap "Forgot password?" to set a new one.`}; }
+        if((await F.getDoc(d('users',cr.user.uid))).exists()){ UI.creating=false; return; }   // already in this company: just signed in
+      }
       ME.user=cr.user; await A.updateProfile(cr.user,{displayName:dd.name});
       if(kind==='owner'){ await A.sendEmailVerification(cr.user).catch(()=>{}); UI.ownerDraft=dd; return; }
       await createProfile(dd, kind); }, kind==='owner'?'Account created. Check your email to verify it.':'Account created');
@@ -1734,4 +1777,4 @@ function start(def){
   render();
 }
 
-export { ACCOUNT_PERKS, ISSUES, recommendServices, CHECKS, CONDITION, reportSec, reportDoc, waLink, waNumber, addMonths, printReport, A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
+export { callAdmin, ACCOUNT_PERKS, ISSUES, recommendServices, CHECKS, CONDITION, reportSec, reportDoc, waLink, waNumber, addMonths, printReport, A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
