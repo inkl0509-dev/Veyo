@@ -14,7 +14,7 @@ function providerView(){
   // Each tab waits only for its own data.
   const NEEDS={tools:['customers'], customers:['customers','users'], team:['techs','users'], chat:['chats','techs'], accounting:['ledger'], settings:['services'], portals:[]};
   if(UI.ptab!=='jobs' && !loaded(...(NEEDS[UI.ptab]||[]))) return h+'<div class="loading">Loading…</div>';
-  if(UI.ptab==='jobs') h+= UI.newJob ? newJobForm() : providerJobs();
+  if(UI.ptab==='jobs') h+= UI.qi ? quickDocForm() : UI.newJob ? newJobForm() : providerJobs();
   else if(UI.ptab==='chat') h+=chatTab();
   else if(UI.ptab==='customers') h+=customersView();
   else if(UI.ptab==='team') h+=teamView();
@@ -56,7 +56,7 @@ function providerJobs(){
   const sel=job(UI.sel);
   const filters=[['action','Needs you'],['active','Open'],['paid','Paid'],['all','All']];
   return `<div class="split ${sel?'has-sel':''}">
-    <section class="pane list-pane"><div class="pane-head"><div class="row" style="justify-content:space-between"><h2>Service requests</h2><button class="btn sm coral" data-act="newJob" data-id="">+ New request</button></div>
+    <section class="pane list-pane"><div class="pane-head"><div class="row" style="justify-content:space-between"><h2>Service requests</h2><div class="row"><button class="btn sm" data-act="qiStart" data-v="quote">+ Quotation / invoice</button><button class="btn sm coral" data-act="newJob" data-id="">+ New request</button></div></div>
       <div class="chips">${filters.map(([k,l])=>`<button class="chip" aria-pressed="${f===k}" data-act="filter" data-v="${k}">${l}</button>`).join('')}</div>
       <input id="jobsearch" type="search" placeholder="Search request no., customer or island" value="${esc(UI.q)}" data-input="search" aria-label="Search requests"></div>
       ${list.length?`<ul class="joblist">${list.map(j=>jobItem(j,j.id===UI.sel)).join('')}</ul>`:`<div class="empty"><h3>${f==='action'?'Nothing needs you right now':'No requests here'}</h3><p>Requests from the customer portal appear here. Take phone bookings with "New request".</p></div>`}
@@ -81,8 +81,7 @@ function chatTab(){
 function newJobForm(){
   const pre = UI.newJob.customerId || '';
   return `<form class="card" data-form="adminBook" style="max-width:860px"><div class="card-h"><h2>New request for a customer</h2><button type="button" class="btn sm" data-act="cancelNewJob">Back to requests</button></div><div class="card-b stack">
-    ${S.customers.length?`<label class="field"><span>Customer</span><select id="ab-cust" name="customerId" required data-change="abCust"><option value="">Choose a customer…</option>${[...S.customers].sort((a,b)=>String(a.name).localeCompare(b.name)).map(cu=>`<option value="${cu.id}" ${cu.id===pre?'selected':''}>${esc(cu.name)} · ${esc(cu.phone||'')}</option>`).join('')}</select></label>`
-      :`<p class="muted">Add the customer in the Customers tab first.</p>`}
+    <input type="hidden" name="customerId" value="${esc(pre)}">${custPicker('newJob', UI.newJob, false)}
     <div class="field"><span>Services</span><div class="opts">${S.services.map((s,i)=>`<label class="opt"><input type="checkbox" id="ab-s-${s.id}" name="svc" value="${s.id}"><span><b>${esc(s.name)}</b><span class="small muted">${money(s.price)} per unit</span></span></label>`).join('')}</div></div>
     <div class="grid3">
       <label class="field"><span>AC units</span><input id="ab-units" name="units" type="number" min="1" value="1"></label>
@@ -93,6 +92,50 @@ function newJobForm(){
     </div>
     <label class="field"><span>What the customer reported</span><textarea id="ab-issue" name="issue"></textarea></label>
     <div class="row"><button class="btn coral">Create request</button><span class="small muted">Address and location come from the customer's record.</span></div></div></form>`;
+}
+
+/* ---------- find a customer ----------
+   Search by name, phone or island instead of scrolling a long list. Shows at most 6 matches. */
+function custMatches(q){
+  q=String(q||'').trim().toLowerCase(); const digits=q.replace(/\D/g,'');
+  if(!q) return [];
+  return S.customers.filter(cu=>[cu.name,cu.island,cu.address,cu.email].join(' ').toLowerCase().includes(q) || (digits.length>=3 && String(cu.phone||'').replace(/\D/g,'').includes(digits)))
+    .sort((a,b)=>String(a.name).localeCompare(b.name)).slice(0,6);
+}
+function custPicker(h, st, allowNew){
+  const cu=S.customers.find(x=>x.id===(st.customerId||st.custId));
+  if(cu) return `<div class="field"><span>Customer</span><div class="cust-chosen"><span class="avatar">${initials(cu.name)}</span><div style="min-width:0;flex:1"><b>${esc(cu.name||'(no name)')}</b><span class="small muted">${esc(cu.phone||'')}${cu.address?' · '+esc(cu.address):''}${cu.island?', '+esc(cu.island):''}</span></div><button type="button" class="btn sm" data-act="custClear" data-h="${h}">Change</button></div></div>`;
+  if(st.newCust) return `<div class="field"><span>New customer</span><div class="callout stack">
+      <div class="grid2"><label class="field"><span>Name</span><input id="${h}-nc-name" value="${esc(st.ncName||'')}" data-np data-st="${h}" data-k="ncName" required></label>
+      <label class="field"><span>Mobile</span><input id="${h}-nc-phone" type="tel" value="${esc(st.ncPhone||'')}" data-np data-st="${h}" data-k="ncPhone"></label>
+      <label class="field"><span>Island / city</span><input id="${h}-nc-island" value="${esc(st.ncIsland||'')}" data-np data-st="${h}" data-k="ncIsland"></label>
+      <label class="field"><span>Address</span><input id="${h}-nc-addr" value="${esc(st.ncAddr||'')}" data-np data-st="${h}" data-k="ncAddr"></label></div>
+      <p class="small muted">Saved to Customers without a portal login. They get the documents from you (PDF or WhatsApp).</p>
+      <div><button type="button" class="linkbtn" data-act="custSearch" data-h="${h}">← Search existing customers instead</button></div></div></div>`;
+  const m=custMatches(st.cq);
+  return `<div class="field"><span>Customer</span><input id="${h}-cq" type="search" data-input="custq" data-h="${h}" value="${esc(st.cq||'')}" placeholder="Type a name, phone or island" autocomplete="off">
+    ${st.cq?`<div class="cust-results">${m.map(cu=>`<button type="button" class="cust-hit" data-act="custPick" data-h="${h}" data-id="${cu.id}"><b>${esc(cu.name||'(no name)')}</b><span>${esc(cu.phone||'')}${cu.island?' · '+esc(cu.island):''}</span></button>`).join('')||'<p class="small muted" style="margin:6px 2px">No customer found.</p>'}</div>`
+      :`<p class="small muted" style="margin:4px 2px">${S.customers.length} customers. Start typing to find one.</p>`}
+    ${allowNew?`<button type="button" class="linkbtn" data-act="custNew" data-h="${h}" style="margin-top:6px">+ New customer${st.cq&&!/\d{3}/.test(st.cq)?': '+esc(st.cq):''}</button>`:''}</div>`;
+}
+const custHolder = h => h==='qi' ? UI.qi : UI.newJob;
+
+/* ---------- quotation or invoice without a visit request ----------
+   For walk-in and phone customers, with or without the app. Saved as a job (marked "direct") so it
+   shows in Service requests, can be printed or sent on WhatsApp, and the invoice posts to Accounting. */
+function quickDocForm(){
+  const st=UI.qi, inv=st.type==='invoice', C=co();
+  const ed=K.lineEditor('qi', {lines:[], discount:0, notes: inv? 'Thank you for your business.' : 'Prices include labour. Parts or gas beyond the listed quantities are charged separately.', dueDays:C.terms||7, methods:{...C.methods}});
+  const e=UI.ed.qi;
+  return `<div class="card" style="max-width:900px"><div class="card-h"><h2>New ${inv?'invoice':'quotation'}</h2><button type="button" class="btn sm" data-act="qiCancel">Back to requests</button></div><div class="card-b stack">
+    <div class="seg" role="tablist" style="align-self:flex-start">${[['quote','Quotation'],['invoice','Invoice']].map(([k,l])=>`<button type="button" role="tab" aria-selected="${st.type===k}" data-act="qiType" data-v="${k}">${l}</button>`).join('')}</div>
+    ${custPicker('qi', st, true)}
+    <div class="field"><span>${inv?'Invoice':'Quotation'} lines</span>${ed}</div>
+    ${inv?`<div class="grid2"><label class="field"><span>Due in (days)</span><input id="qi-due" data-np data-ed="qi" data-f="dueDays" type="number" min="0" value="${esc(e.dueDays)}"></label></div>
+      <div class="field"><span>Payment methods</span><div class="row">${Object.entries(METHODS).map(([k,m])=>`<label class="row small" style="gap:6px"><input type="checkbox" id="qi-m-${k}" data-np data-ed="qi" data-f="methods.${k}" ${e.methods[k]?'checked':''}>${m.n}</label>`).join('')}</div></div>`:''}
+    <label class="field"><span>Notes</span><textarea id="qi-notes" data-np data-ed="qi" data-f="notes">${esc(e.notes||'')}</textarea></label>
+    <div class="row"><button class="btn primary" data-act="qiSave">${inv?'Create invoice':'Create quotation'}</button>
+      <span class="small muted">${inv?'Posts the sale, GST and the amount owed to Accounting.':'You can turn it into an invoice later.'} Then save it as a PDF or send it on WhatsApp.</span></div></div></div>`;
 }
 
 /* ---------- customers ---------- */
@@ -320,7 +363,43 @@ const actions = {
   filter(el){ UI.filter=el.dataset.v; saveUI(); render(); },
   period(el){ UI.period=el.dataset.v; saveUI(); render(); },
   gotoJob(el){ UI.ptab='jobs'; UI.filter='all'; UI.sel=el.dataset.id; UI.newJob=null; saveUI(); render(); scrollTo(0,0); },
-  newJob(el){ UI.ptab='jobs'; UI.newJob={customerId:el.dataset.id||''}; render(); scrollTo(0,0); },
+  newJob(el){ UI.ptab='jobs'; UI.qi=null; UI.newJob={customerId:el.dataset.id||''}; render(); scrollTo(0,0); },
+  qiStart(el){ UI.ptab='jobs'; UI.newJob=null; UI.sel=''; delete UI.ed.qi; UI.qi={type:el.dataset.v||'quote', custId:el.dataset.id||'', cq:''}; render(); scrollTo(0,0); },
+  qiCancel(){ UI.qi=null; delete UI.ed.qi; render(); },
+  qiType(el){ UI.qi.type=el.dataset.v; const e=UI.ed.qi; if(e) e.notes = el.dataset.v==='invoice' ? 'Thank you for your business.' : 'Prices include labour. Parts or gas beyond the listed quantities are charged separately.'; render(); },
+  custPick(el){ const st=custHolder(el.dataset.h); if(el.dataset.h==='qi') st.custId=el.dataset.id; else st.customerId=el.dataset.id; st.cq=''; render(); },
+  custClear(el){ const st=custHolder(el.dataset.h); st.custId=''; st.customerId=''; render(); setTimeout(()=>document.getElementById(el.dataset.h+'-cq')?.focus(),0); },
+  custNew(el){ const st=custHolder(el.dataset.h); st.newCust=true; if(st.cq && !/\d{3}/.test(st.cq)) st.ncName=st.cq; else if(st.cq) st.ncPhone=st.cq; render(); },
+  custSearch(el){ const st=custHolder(el.dataset.h); st.newCust=false; render(); },
+  qiSave(el){ const st=UI.qi, e=UI.ed.qi, inv=st.type==='invoice';
+    const lines=(e?.lines||[]).filter(l=>String(l.desc).trim()).map(l=>({desc:String(l.desc).trim(), qty:+l.qty||0, rate:r2(l.rate)}));
+    let cu=S.customers.find(x=>x.id===st.custId);
+    if(!cu && !(st.newCust && String(st.ncName||'').trim())) return toast('Choose the customer, or add a new one.');
+    if(!lines.length) return toast('Add at least one line.');
+    const methods=Object.keys(METHODS).filter(k=>e.methods?.[k]);
+    if(inv && !methods.length) return toast('Choose at least one payment method.');
+    el.disabled=true;
+    run(async()=>{
+      const at=nowISO();
+      if(!cu){ const ref=F.doc(c('customers'));
+        cu={id:ref.id, name:st.ncName.trim(), phone:String(st.ncPhone||'').trim(), island:String(st.ncIsland||'').trim(), address:String(st.ncAddr||'').trim()};
+        await F.setDoc(ref, {name:cu.name, phone:cu.phone, email:'', island:cu.island, address:cu.address, hasLogin:false, createdAt:at}); }
+      const qno = inv? null : `Q-${today().slice(0,4)}-${K.pad(await K.nextNumber('quotes'))}`;
+      const jref=F.doc(c('jobs'));
+      const created=await F.runTransaction(db, async tx=>{
+        const jc=d('counters','jobs'), js=await tx.get(jc), n=(js.exists()?js.data().n:0)+1;
+        let ic, is, inn; if(inv){ ic=d('counters','invoices'); is=await tx.get(ic); inn=(is.exists()?is.data().n:0)+1; }
+        const data={no:'SR-'+(1000+n), customerId:cu.id, customerName:cu.name, customerPhone:cu.phone||'', serviceIds:[], units:1, acType:'', btu:'', island:cu.island||'', address:cu.address||'', issue:'', createdAt:at, bookedBy:'office', direct:true};
+        if(inv){
+          const I={no:`INV-${today().slice(0,4)}-${K.pad(inn)}`, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, issuedAt:at, dueDate:addDays(today(),+e.dueDays||0), methods};
+          const t=K.totals(I); Object.assign(I,{subtotal:t.net, gst:t.gst, total:t.total}); data.invoice=I;
+          tx.set(ic,{n:inn});
+          tx.set(d('ledger','inv-'+jref.id),{date:today(), at, ref:I.no, memo:`Invoice to ${cu.name}`, jobId:jref.id, lines:[{acct:'1100',dr:t.total},{acct:'4000',cr:t.net},{acct:'2100',cr:t.gst}].filter(l=>(l.dr||l.cr)>0)});
+        } else data.quote={no:qno, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, sentAt:at, validUntil:addDays(today(),14), status:'sent', rev:1};
+        tx.set(jc,{n}); tx.set(jref,data); return data; });
+      await log(jref.id, inv? `Invoice ${created.invoice.no} created by ${K.myName()}: ${money(created.invoice.total)}` : `Quotation ${qno} created by ${K.myName()}`);
+      UI.qi=null; delete UI.ed.qi; UI.filter='all'; UI.sel=jref.id; saveUI(); scrollTo(0,0);
+    }, inv?'Invoice created and posted to Accounting':'Quotation created').finally(()=>{ el.disabled=false; }); },
   cancelNewJob(){ UI.newJob=null; render(); },
   async copy(el){ try{ await navigator.clipboard.writeText(el.dataset.v); toast('Link copied'); }catch(e){ toast(el.dataset.v); } },
   toggleUser(el){ const u=userOf(el.dataset.id); if(!u) return; const next=(u.status||'active')==='active'?'paused':'active';
@@ -361,7 +440,7 @@ const forms = {
       else id=F.doc(c('customers')).id;
       await F.setDoc(d('customers',id),{name:dd.name, phone:dd.phone, email, island:dd.island||'', address:dd.address||'', hasLogin:!!email, createdAt:nowISO()});
       f.reset(); }, 'Customer added').finally(()=>btn.disabled=false); },
-  adminBook(f,dd,fdata){ const cu=S.customers.find(x=>x.id===dd.customerId), svcs=fdata.getAll('svc');
+  adminBook(f,dd,fdata){ const cu=S.customers.find(x=>x.id===(UI.newJob?.customerId||dd.customerId)), svcs=fdata.getAll('svc');
     if(!cu) return toast('Choose a customer.'); if(!svcs.length) return toast('Choose at least one service.');
     run(async()=>{ const ref=F.doc(c('jobs'));
       const created=await F.runTransaction(db, async tx=>{ const cref=d('counters','jobs'), cs=await tx.get(cref), n=(cs.exists()?cs.data().n:0)+1; tx.set(cref,{n});
@@ -397,5 +476,8 @@ document.addEventListener('input', e=>{ const t=e.target;
   if(t.dataset.brandhex){ let v=t.value.trim(); if(v && v[0]!=='#') v='#'+v; setBrandColor(t.dataset.brandhex, v); } });
 
 document.addEventListener('input', e=>{ if(e.target.dataset.input==='cq'){ UI.cq=e.target.value; render(); } });
+document.addEventListener('input', e=>{ const t=e.target;
+  if(t.dataset.input==='custq'){ const st=custHolder(t.dataset.h); if(st){ st.cq=t.value; render(); } }
+  if(t.dataset.st){ const st=custHolder(t.dataset.st); if(st) st[t.dataset.k]=t.value; } });
 
 K.start({view:providerView, actions, forms, change});
