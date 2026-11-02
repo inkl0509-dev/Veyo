@@ -708,3 +708,9 @@ body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5
 .cust-chosen{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface-2)}
 .cust-chosen>div{display:flex;flex-direction:column}
 .doc-acts{margin:8px 0 4px}
+
+/* Off-screen copy used to make PDFs and images: always light, A4-like width */
+.capture{position:fixed;left:-10000px;top:0;width:760px;padding:24px;background:#fff;color:#0C2233;
+  --bg:#fff; --surface:#fff; --surface-2:#F5F9FC; --ink:#0C2233; --muted:#526C80; --line:#D9E4ED; --shadow:none; color-scheme:light}
+.capture .doc,.capture .report-doc{box-shadow:none}
+.capture .tscroll{overflow:visible}
