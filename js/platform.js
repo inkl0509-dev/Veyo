@@ -4,7 +4,7 @@ let firebaseConfig = null, CONFIG_ERROR = '';
 try { ({ firebaseConfig } = await import('./firebase-config.js')); } catch (e) { CONFIG_ERROR = String(e?.message || e); }
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
 const CONFIGURED = !!firebaseConfig?.apiKey && !String(firebaseConfig.apiKey).startsWith('YOUR_');
-const RESERVED = ['tech','admin','platform','assets','css','js','functions','index','sw','api','www'];
+const RESERVED = ['tech','admin','customer','platform','assets','css','js','functions','index','sw','api','www'];
 
 let A, F, appMod, auth, db;
 if (CONFIGURED) {
