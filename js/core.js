@@ -25,17 +25,55 @@ const STANDALONE = matchMedia('(display-mode: standalone)').matches || navigator
    Each company has its own code, used in the address: /reefside (customers), /reefside/tech, /reefside/admin.
    ?c=reefside also works (handy for local testing). All of the company's data lives under tenants/{code}. */
 const RESERVED = ['tech','admin','platform','assets','css','js','functions','index','sw','api','www'];
+// One company: set SETTINGS.companyCode in firebase-config.js. The site then opens that company at
+// /, /tech and /admin, and nobody is asked for a code.
+/* One company for the whole site. Which one is kept in platform/site (public), so existing data is used:
+   it's filled in the first time the office opens its existing portal, or the platform admin opens /platform.
+   A brand-new site with no company yet uses "main", set up by the office at /admin.
+   companyCode in firebase-config.js overrides it; multiCompany: true gives each company its own address. */
+const SITE_KEY='acsp-site';
+async function siteCompany(){
+  try{
+    const r=await fetch(`https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents/platform/site?key=${firebaseConfig.apiKey}`);
+    if(r.status===404) return '';
+    if(!r.ok) return null;
+    return String((await r.json())?.fields?.company?.stringValue||'');
+  }catch(e){ return null; }   // offline: keep what we had
+}
+let SITE_CO='', SITE_EMPTY=false;   // SITE_EMPTY: no company recorded for this site yet
+if(CONFIGURED && !SETTINGS.companyCode && !SETTINGS.multiCompany){
+  try{ SITE_CO=localStorage.getItem(SITE_KEY)||''; }catch(e){}
+  const fresh = SITE_CO ? null : await siteCompany();
+  if(fresh) SITE_CO=fresh;
+  if(fresh==='') SITE_EMPTY=true;
+  if(fresh!==null){ try{ fresh ? localStorage.setItem(SITE_KEY, fresh) : 0; }catch(e){} }
+  // Saved copy: check in the background and reload if the office moved the site to another company.
+  if(!fresh) siteCompany().then(c=>{ if(c && c!==SITE_CO){ try{ localStorage.setItem(SITE_KEY,c); }catch(e){} location.reload(); } });
+}
+/** The office of an existing company makes it the site's company (only if none is recorded yet). */
+async function claimSite(){
+  if(!SITE_EMPTY || SETTINGS.companyCode || SETTINGS.multiCompany || !CO) return;
+  SITE_EMPTY=false;
+  try{ await F.setDoc(F.doc(db,'platform','site'), {company:CO, at:nowISO(), by:ME.user.uid}); try{ localStorage.setItem(SITE_KEY, CO); }catch(e){}
+    if(CO!=='main') toast('This is now the company for your whole site: customers use the main address, no code needed.'); }
+  catch(e){ console.warn('site company', e); }
+}
+const DEFAULT_CO = String(SETTINGS.companyCode || SITE_CO || (SETTINGS.multiCompany ? '' : 'main')).trim().toLowerCase().replace(/[^a-z0-9-]/g,'');
+const FIRST_RUN_CO = 'main';   // this company can be created by its first office account, without /platform
 const CO = (()=>{
   const q=(new URLSearchParams(location.search).get('c')||'').toLowerCase();
   if(q) return q;
   const seg=(location.pathname.split('/').filter(Boolean)[0]||'').toLowerCase();
-  return seg && !seg.includes('.') && !RESERVED.includes(seg) ? seg : '';
+  return seg && !seg.includes('.') && !RESERVED.includes(seg) ? seg : DEFAULT_CO;
 })();
+const SINGLE = !!DEFAULT_CO && CO===DEFAULT_CO;
+try{ if(DEFAULT_CO) localStorage.setItem('acsp-default', DEFAULT_CO); else localStorage.removeItem('acsp-default'); }catch(e){}
 const PATH_MODE = !!CO && !new URLSearchParams(location.search).get('c');
 /** Link to a portal of this company, optionally with ?job=… or ?chat=… */
 function portalHref(p, params){
-  const q=new URLSearchParams(params||{});
-  if(PATH_MODE) return `/${CO}${{customer:'',technician:'/tech',admin:'/admin'}[p]}${q.toString()?'?'+q:''}`;
+  const q=new URLSearchParams(params||{}), qs=q.toString()?'?'+q:'';
+  if(PATH_MODE && SINGLE) return `${{customer:'/',technician:'/tech',admin:'/admin'}[p]}${qs}`;
+  if(PATH_MODE) return `/${CO}${{customer:'',technician:'/tech',admin:'/admin'}[p]}${qs}`;
   q.set('c', CO); return `/${PORTAL_URL[p]}?${q}`;
 }
 const PORTAL_NAME = {customer:'Customer portal', technician:'Technician portal', admin:'Admin portal'};
@@ -222,6 +260,8 @@ function haversineKm(a,b){ const R=6371, toR=x=>x*Math.PI/180; const dLat=toR(b.
 const co = () => Object.assign({name:'Your AC company', tagline:'Air-conditioning service', gstRate:8, terms:7, phone:'', email:'', address:'', reg:'', tin:'', bml:'', mib:'', methods:{cash:true,bml:true,mib:true,card:true}}, S.company||{});
 const sv = id => S.services.find(x=>x.id===id);
 const cust = id => S.customers.find(x=>x.id===id);
+// The customer's GST TIN for quotations and invoices: from their record, or saved on the document.
+const custTin = j => cust(j.customerId)?.tin || j.invoice?.customerTin || j.quote?.customerTin || '';
 const tech = id => S.techs.find(x=>x.id===id);
 const job = id => S.jobs.find(x=>x.id===id) || (S.openJobs||[]).find(x=>x.id===id);
 // A job sent to one technician waits for them to accept it. Older jobs without assignStatus count as accepted.
@@ -629,6 +669,7 @@ function startAuth(){
         const ok = ME.profile && ME.profile.role===PORTAL_ROLE && (ME.profile.status||'active')==='active';
         const role = ok ? ME.profile.role : null;
         if(role!==ME.role){ ME.role=role; UI.sel=''; if(role) startSubs(); else stopSubs(); }
+        if(role==='provider') claimSite();
         schedRender();
       }, e=>{ ME.profileLoaded=true; toast(errMsg(e)); schedRender(); });
     }
@@ -636,6 +677,8 @@ function startAuth(){
   });
 }
 async function createProfile(dd, kind){
+  // One-company site set up with Google sign-in: the company doesn't exist yet, create it first.
+  if(kind==='owner' && CO===FIRST_RUN_CO && !S.tenant) await F.setDoc(tenantRef(), {name:dd.company||UI.ownerDraft?.company||'', status:'active', createdAt:nowISO()});
   const u=ME.user, b=F.writeBatch(db);
   const base={name:dd.name, email:(u.email||dd.email||'').toLowerCase(), phone:dd.phone||'', status:'active', createdAt:nowISO()};
   if(kind==='owner'){
@@ -646,7 +689,9 @@ async function createProfile(dd, kind){
     b.set(d('customers',u.uid), {name:dd.name, phone:dd.phone||'', email:base.email, island:dd.island||'', address:dd.address||'', hasLogin:true, createdAt:nowISO()});
   }
   await b.commit();
-  if(kind==='owner') await F.setDoc(d('company','profile'), {phone:dd.phone||'', email:base.email}, {merge:true});
+  if(kind==='owner'){ const nm=dd.company || UI.ownerDraft?.company || (CO===FIRST_RUN_CO ? S.tenant?.name : '');
+    await F.setDoc(d('company','profile'), {phone:dd.phone||'', email:base.email, ...(nm?{name:nm}:{})}, {merge:true});
+    if(nm && nm!==S.tenant?.name) await F.updateDoc(tenantRef(), {name:nm, updatedAt:nowISO()}).catch(()=>{}); }
 }
 // The admin creates sign-in accounts for technicians, office staff and phone customers.
 // A temporary second Firebase app is used so the admin stays signed in.
@@ -710,7 +755,7 @@ function saveShell(html){
 function rememberCompany(ok){ try{ if(ok) localStorage.setItem('acsp-co', CO); else if(localStorage.getItem('acsp-co')===CO) localStorage.removeItem('acsp-co'); }catch(e){} }
 const switchHref = () => IN_APP ? '/app.html?switch=1' : `/${PORTAL_URL[PORTAL]}?switch=1`;
 // Small corner button on the sign-in page for opening another company (the code is otherwise remembered).
-const coSwitchIcon = () => `<a class="co-switch" href="${switchHref()}" title="Change company" aria-label="Change company"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-5h6v5M9 10h.01M15 10h.01M9 13h.01M15 13h.01"/></svg></a>`;
+const coSwitchIcon = () => SINGLE ? '' : `<a class="co-switch" href="${switchHref()}" title="Change company" aria-label="Change company"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-5h6v5M9 10h.01M15 10h.01M9 13h.01M15 13h.01"/></svg></a>`;
 function clearDeviceCopies(){ try{ Object.keys(localStorage).filter(k=>k.startsWith(`acsp-shell-${CO}-`)||k.startsWith(`acsp-me-${CO}-`)).forEach(k=>localStorage.removeItem(k)); }catch(e){} }
 function findCompanyView(){
   return `<div class="auth"><section class="auth-hero"><div class="brand" style="margin:0">${markSVG()}<div><b>AC Service Portal</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
@@ -730,8 +775,13 @@ function view(){
   if(!S.pub.tenant) return waiting(`<div class="loading">Opening…</div>`);
   if(!S.tenant && S.tenantErr==='permission-denied') return gateView("The database blocked this page", `Firestore refused to read company <b>${esc(CO)}</b>. Publish the latest <b>firestore.rules</b> in Firebase console → Firestore Database → Rules, then reload.`);
   if(!S.tenant && S.tenantErr) return gateView("Couldn't reach the database", `Check your internet connection and reload. (${esc(S.tenantErr)})`);
-  if(!S.tenant) return gateView("We couldn't find this company", `There's no company with the code <b>${esc(CO)}</b>. Check the link you were sent.<br><br><span class="small muted">Setting this company up? Create it first on the <a href="/platform.html">platform admin page</a>.</span><br><br><a class="btn block" href="${switchHref()}">Enter a different company code</a>`);
-  if(S.tenant.status!=='active') return gateView(`${esc(S.tenant.name||'This service')} is unavailable`, 'This portal is paused for now. Please contact the company directly.');
+  // One company, not set up yet: the office creates it at /admin; customers and technicians wait.
+  if(!S.tenant && SINGLE && CO===FIRST_RUN_CO){
+    if(PORTAL!=='admin') return gateView('Opening soon', `This service isn't set up yet. Please check back soon.`);
+    if(!ME.user && UI.authMode==='signin') UI.authMode='signup';
+  }
+  else if(!S.tenant) return gateView("We couldn't find this company", `There's no company with the code <b>${esc(CO)}</b>. Check the link you were sent.<br><br><span class="small muted">Setting this company up? Create it first on the <a href="/platform.html">platform admin page</a>.</span><br><br><a class="btn block" href="${switchHref()}">Enter a different company code</a>`);
+  if(S.tenant && S.tenant.status!=='active') return gateView(`${esc(S.tenant.name||'This service')} is unavailable`, 'This portal is paused for now. Please contact the company directly.');
   if(!S.pub.company || !S.pub.portal) return waiting(`<div class="loading">Opening the ${PORTAL_NAME[PORTAL].toLowerCase()}…</div>`);
   if(!ME.user) return authView();
   if(!ME.profileLoaded || UI.creating) return waiting(`<div class="loading">Setting up your account…</div>`, !UI.creating);
@@ -768,7 +818,7 @@ function header(){
     <div class="brand">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
     ${PORTAL==='admin'?`<nav class="portal-links"><a href="${portalHref('customer')}" target="_blank" rel="noopener">Customer portal ↗</a><a href="${portalHref('technician')}" target="_blank" rel="noopener">Technician portal ↗</a></nav>`:''}
     <div class="me">${bellButton()}<span class="avatar">${esc(initials(ME.profile?.name))}</span><div class="me-txt"><div style="font-weight:700;line-height:1.2">${esc(ME.profile?.name||(ME.user?.isAnonymous?'Guest':''))}</div><span class="role-badge ${ME.role}">${ME.role==='provider'?'Office':ME.role==='technician'?'Technician':'Customer'}</span></div>
-    ${IN_APP?`<a class="btn sm" href="/app.html?switch=1">${APP_ROLE?'Company':'Switch'}</a>`:''}<button class="btn sm signout" data-act="signOut">Sign out</button></div>
+    ${IN_APP && !(SINGLE && APP_ROLE)?`<a class="btn sm" href="/app.html?switch=1">${APP_ROLE?'Company':'Switch'}</a>`:''}<button class="btn sm signout" data-act="signOut">Sign out</button></div>
   </div></header>`;
 }
 function gateView(title, text, linkTo){
@@ -852,7 +902,10 @@ function authView(){
   return `<div class="auth">${heroHTML}<section class="auth-form">${f}${coSwitchIcon()}</section></div>`;
 }
 function profileExtraFields(kind){
-  if(kind==='owner') return `<p class="small muted">Use the email address you gave the platform admin for <b>${esc(brandName())}</b>.</p>`;
+  if(kind==='owner') return CO===FIRST_RUN_CO
+    ? `<label class="field"><span>Business name</span><input id="au-company" name="company" value="${esc(UI.ownerDraft?.company||S.tenant?.name||'')}" placeholder="e.g. Veyo Aircon Services" required></label>
+       <p class="small muted">You'll add the logo, address, GST TIN and bank accounts next.</p>`
+    : `<p class="small muted">Use the email address you gave the platform admin for <b>${esc(brandName())}</b>.</p>`;
   return `<div class="grid2"><label class="field"><span>Island / city</span><input id="au-island" name="island" placeholder="Malé, Hulhumalé, Thulusdhoo…"></label>
     <label class="field"><span>Address</span><input id="au-address" name="address" placeholder="House, road, floor"></label></div>`;
 }
@@ -991,7 +1044,7 @@ function docView(kind, dc, j){
   return `<div class="doc ${inv?'invoice':''}">
     <div class="doc-h"><div>${BRAND?.logo?`<img class="doc-logo" src="${esc(BRAND.logo)}" alt="${esc(C.name)} logo">`:''}<h3>${esc(C.name)}</h3><p class="small muted">${esc(C.address)}${C.phone?'<br>'+esc(C.phone):''}${C.email?' · '+esc(C.email):''}${C.tin?'<br>GST TIN '+esc(C.tin):''}</p></div>
       <div><div class="doc-kind">${kind}</div><p class="small mono" style="text-align:right">${esc(dc.no)}<br>${inv?'Issued '+fd(dc.issuedAt)+'<br>Due '+fd(dc.dueDate):'Sent '+fd(dc.sentAt)+'<br>Valid until '+fd(dc.validUntil)}</p></div></div>
-    <div class="small"><span class="label">Bill to</span><br><b>${esc(j.customerName||'')}</b><br>${esc(j.address||'')}${j.island?', '+esc(j.island):''}${j.customerPhone?' · '+esc(j.customerPhone):''}<br><span class="muted">Ref ${esc(j.no)}</span></div>
+    <div class="small"><span class="label">Bill to</span><br><b>${esc(j.customerName||'')}</b><br>${esc(j.address||'')}${j.island?', '+esc(j.island):''}${j.customerPhone?' · '+esc(j.customerPhone):''}${custTin(j)?`<br>TIN ${esc(custTin(j))}`:''}</div>
     <div class="tscroll"><table><thead><tr><th>Description</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead>
       <tbody>${(dc.lines||[]).map(l=>`<tr><td>${esc(l.desc)}</td><td class="r">${esc(l.qty)}</td><td class="r">${money(l.rate)}</td><td class="r">${money((+l.qty||0)*(+l.rate||0))}</td></tr>`).join('')}</tbody></table></div>
     <div class="doc-foot"><div class="small muted" style="max-width:360px">${esc(dc.notes||'')}${inv&&(dc.methods||[]).length?`<br><br><b>Pay by:</b> ${(dc.methods||[]).map(m=>METHODS[m]?.n).join(', ')}${(dc.methods||[]).includes('bml')&&C.bml?`<br>BML ${esc(C.bml)}`:''}${(dc.methods||[]).includes('mib')&&C.mib?`<br>MIB ${esc(C.mib)}`:''}`:''}</div>
@@ -1084,7 +1137,8 @@ function loadLeaflet(){
   if(window.L) return Promise.resolve();
   if(!leafletP) leafletP=new Promise((res,rej)=>{
     const l=document.createElement('link'); l.rel='stylesheet'; l.href=LEAFLET+'leaflet.min.css'; document.head.appendChild(l);
-    const sc=document.createElement('script'); sc.src=LEAFLET+'leaflet.min.js'; sc.onload=()=>res(); sc.onerror=()=>{ leafletP=null; rej(new Error('map')); }; document.head.appendChild(sc);
+    const sc=document.createElement('script'); sc.src=LEAFLET+'leaflet.min.js'; sc.onload=()=>{ if(window.L) res(); else rej(new Error('map')); };   // a broken download must not loop
+    sc.onerror=()=>{ leafletP=null; rej(new Error('map')); }; document.head.appendChild(sc);
   });
   return leafletP;
 }
@@ -1368,7 +1422,7 @@ function docWaLink(kind, D, j){
   const C=co(), t=totals(D), paid=kind==='Invoice' && j.payment?.status==='paid';
   const text=`${C.name}\n${kind} ${D.no} for ${j.customerName||''}\n`+(D.lines||[]).map(l=>`• ${l.desc} × ${l.qty}: ${money((+l.qty||0)*(+l.rate||0))}`).join('\n')+
     `\n${t.disc?'Discount: -'+money(t.disc)+'\n':''}GST ${t.rate}%: ${money(t.gst)}\nTotal: ${money(t.total)}`+
-    (kind==='Invoice'? (paid?`\nPAID ${fd(j.payment.paidAt)}. Thank you!`:`\nDue ${fd(D.dueDate)}.${(D.methods||[]).includes('bml')&&C.bml?' BML '+C.bml+'.':''}${(D.methods||[]).includes('mib')&&C.mib?' MIB '+C.mib+'.':''} Reference ${j.no}.`) : `\nValid until ${fd(D.validUntil)}. Reply to accept.`);
+    (kind==='Invoice'? (paid?`\nPAID ${fd(j.payment.paidAt)}. Thank you!`:`\nDue ${fd(D.dueDate)}.${(D.methods||[]).includes('bml')&&C.bml?' BML '+C.bml+'.':''}${(D.methods||[]).includes('mib')&&C.mib?' MIB '+C.mib+'.':''} Reference ${D.no}.`) : `\nValid until ${fd(D.validUntil)}. Reply to accept.`);
   return `https://wa.me/${waNumber(j.customerPhone)}?text=${encodeURIComponent(text)}`;
 }
 // Customers see the total and open the full document only if they want it.
@@ -1391,7 +1445,7 @@ function invoiceSec(j){
   if(!I){
     const key='i-'+j.id;
     const base=j.quote? clone(j.quote.lines) : (j.serviceIds||[]).map(sv).filter(Boolean).map(s=>({desc:s.name,qty:j.units||1,rate:s.price}));
-    const init={lines:base, discount:j.quote?.discount||0, notes:'Thank you for your business. Please quote '+(j.no||'')+' as the payment reference.', dueDays:C.terms||7, methods:{...C.methods}};
+    const init={lines:base, discount:j.quote?.discount||0, notes:'Thank you for your business. Please use the invoice number as the payment reference.', dueDays:C.terms||7, methods:{...C.methods}};
     h+=`<div class="callout">${lineEditor(key,init)}
       <div class="grid2"><label class="field"><span>Due in (days)</span><input id="${key}-due" data-np data-ed="${key}" data-f="dueDays" type="number" min="0" value="${esc(UI.ed[key].dueDays)}"></label></div>
       <div class="field"><span>Payment methods the customer can use</span><div class="row">${Object.entries(METHODS).map(([k,m])=>`<label class="row small" style="gap:6px"><input type="checkbox" id="${key}-m-${k}" data-np data-ed="${key}" data-f="methods.${k}" ${UI.ed[key].methods[k]?'checked':''}>${m.n}</label>`).join('')}</div></div>
@@ -1431,7 +1485,7 @@ function payPanel(j){
         <div><span class="label">Account name</span><b>${esc(C.name)}</b></div>
         <div><span class="label">Account number</span><span class="row"><b class="mono">${esc(acct||'Ask the office')}</b>${acct?copyBtn(acct):''}</span></div>
         <div><span class="label">Amount</span><span class="row"><b>${money(I.total)}</b>${copyBtn((+I.total).toFixed(2))}</span></div>
-        <div><span class="label">Reference</span><span class="row"><b class="mono">${esc(j.no)}</b>${copyBtn(j.no)}</span></div>
+        <div><span class="label">Reference</span><span class="row"><b class="mono">${esc(j.invoice?.no||j.no)}</b>${copyBtn(j.invoice?.no||j.no)}</span></div>
       </div></div></div>
     <div class="pay-step"><span class="pay-n">3</span><div class="stack" style="flex:1;min-width:0"><b>Show us you've paid</b>
       <label class="field"><span>Transfer reference from your bank app</span><input id="pr-${j.id}" placeholder="e.g. BLAZ2610271234"></label>
@@ -1568,7 +1622,7 @@ const ACT = {
     const lines=e.lines.filter(l=>String(l.desc).trim()).map(l=>({desc:String(l.desc).trim(),qty:+l.qty||0,rate:r2(l.rate)}));
     if(!lines.length) return toast('Add at least one line to the quotation.');
     run(async()=>{ const no=j.quote?.no || `Q-${today().slice(0,4)}-${pad(await nextNumber('quotes'))}`;
-      const quote={no, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, sentAt:nowISO(), validUntil:addDays(today(),14), status:'sent', rev:(j.quote?.rev||0)+1};
+      const quote={no, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, customerTin:cust(j.customerId)?.tin||'', sentAt:nowISO(), validUntil:addDays(today(),14), status:'sent', rev:(j.quote?.rev||0)+1};
       await F.updateDoc(jobRef(j.id),{quote}); await event(j,`Quotation ${no}${quote.rev>1?' (revised)':''} sent: ${money(totals(quote).total)}. Please review and approve.`,['customer'],'Your quotation is ready'); delete UI.ed[key]; UI.confirm=''; }, 'Quotation sent'); },
 
   quoteAccept(el){ const j=job(el.dataset.id), note=val('qr-'+j.id);
@@ -1663,7 +1717,7 @@ const ACT = {
     run(async()=>{
       await F.runTransaction(db, async tx=>{
         const cref=d('counters','invoices'), cs=await tx.get(cref), n=(cs.exists()?cs.data().n:0)+1;
-        const inv={no:`INV-${today().slice(0,4)}-${pad(n)}`, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, issuedAt:nowISO(), dueDate:addDays(today(),+e.dueDays||0), methods};
+        const inv={no:`INV-${today().slice(0,4)}-${pad(n)}`, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, customerTin:cust(j.customerId)?.tin||'', issuedAt:nowISO(), dueDate:addDays(today(),+e.dueDays||0), methods};
         const t=totals(inv); Object.assign(inv,{subtotal:t.net, gst:t.gst, total:t.total});
         tx.set(cref,{n});
         tx.update(jobRef(j.id),{invoice:inv});
@@ -1732,7 +1786,10 @@ const FORMS = {
         if((await F.getDoc(d('users',cr.user.uid))).exists()){ UI.creating=false; return; }   // already in this company: just signed in
       }
       ME.user=cr.user; await A.updateProfile(cr.user,{displayName:dd.name});
-      if(kind==='owner'){ await A.sendEmailVerification(cr.user).catch(()=>{}); UI.ownerDraft=dd; return; }
+      if(kind==='owner'){
+        // First run of the one-company site: the company itself is created here.
+        if(CO===FIRST_RUN_CO && !S.tenant) await F.setDoc(tenantRef(), {name:dd.company||'', status:'active', createdAt:nowISO()});
+        await A.sendEmailVerification(cr.user).catch(()=>{}); UI.ownerDraft=dd; return; }
       await createProfile(dd, kind); }, kind==='owner'?'Account created. Check your email to verify it.':'Account created');
     UI.creating=false; if(ok && kind==='owner'){ UI.ptab='settings'; saveUI(); } render(); },
   async completeProfile(f,dd){ const kind=f.dataset.kind; UI.creating=true; render();
@@ -1777,4 +1834,4 @@ function start(def){
   render();
 }
 
-export { callAdmin, ACCOUNT_PERKS, ISSUES, recommendServices, CHECKS, CONDITION, reportSec, reportDoc, waLink, waNumber, addMonths, printReport, A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
+export { SINGLE, DEFAULT_CO, custTin, callAdmin, ACCOUNT_PERKS, ISSUES, recommendServices, CHECKS, CONDITION, reportSec, reportDoc, waLink, waNumber, addMonths, printReport, A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
