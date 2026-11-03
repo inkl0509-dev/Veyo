@@ -19,7 +19,7 @@ if (params.get('messagingSenderId')) {
    Libraries with a version in their address (Firebase, map, fonts) never change: keep them on the device.
    The portal's own pages, scripts and styles: always try the network first (so updates show at once),
    and fall back to the saved copy if the network is slow or offline. */
-const CACHE = 'acsp-v3';
+const CACHE = 'acsp-v4';
 const KEEP = [/^https:\/\/www\.gstatic\.com\/firebasejs\//, /^https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/(leaflet|html2canvas|jspdf)\//, /^https:\/\/fonts\.(googleapis|gstatic)\.com\//];
 
 async function keepFirst(req){
