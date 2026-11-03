@@ -24,7 +24,7 @@ const STANDALONE = matchMedia('(display-mode: standalone)').matches || navigator
 /* ---------- which company ----------
    Each company has its own code, used in the address: /reefside (customers), /reefside/tech, /reefside/admin.
    ?c=reefside also works (handy for local testing). All of the company's data lives under tenants/{code}. */
-const RESERVED = ['tech','admin','platform','assets','css','js','functions','index','sw','api','www'];
+const RESERVED = ['tech','admin','customer','platform','assets','css','js','functions','index','sw','api','www'];
 // One company: set SETTINGS.companyCode in firebase-config.js. The site then opens that company at
 // /, /tech and /admin, and nobody is asked for a code.
 /* One company for the whole site. Which one is kept in platform/site (public), so existing data is used:
@@ -72,7 +72,7 @@ const PATH_MODE = !!CO && !new URLSearchParams(location.search).get('c');
 /** Link to a portal of this company, optionally with ?job=… or ?chat=… */
 function portalHref(p, params){
   const q=new URLSearchParams(params||{}), qs=q.toString()?'?'+q:'';
-  if(PATH_MODE && SINGLE) return `${{customer:'/',technician:'/tech',admin:'/admin'}[p]}${qs}`;
+  if(PATH_MODE && SINGLE) return `${{customer:'/customer',technician:'/tech',admin:'/admin'}[p]}${qs}`;
   if(PATH_MODE) return `/${CO}${{customer:'',technician:'/tech',admin:'/admin'}[p]}${qs}`;
   q.set('c', CO); return `/${PORTAL_URL[p]}?${q}`;
 }
@@ -212,7 +212,8 @@ function updateIcons(){
       const man={name:`${nm} · ${PORTAL_NAME[PORTAL]}`, short_name:nm.length>14? nm.slice(0,14) : nm, start_url:new URL(portalHref(PORTAL),location.href).href, scope:new URL(PATH_MODE?`/${CO}/`:'/',location.href).href, id:`${CO}-${PORTAL}`,
         display:'standalone', background_color:'#FFFFFF', theme_color:BRAND.color? brandPalette(BRAND).theme : '#0077B6',
         icons:[{src:i192,sizes:'192x192',type:'image/png'},{src:i512,sizes:'512x512',type:'image/png'},{src:i512,sizes:'512x512',type:'image/png',purpose:'maskable'}]};
-      if(!IS_IOS) setLink('manifest', URL.createObjectURL(new Blob([JSON.stringify(man)],{type:'application/manifest+json'})));
+      // The install file stays the real one (manifest-*.webmanifest): each portal installs as its own app with
+      // its own scope (/customer, /tech, /admin). A generated one confused phones into opening the wrong portal.
     }catch(e){ console.warn('brand icons', e); }
   }, 60);
 }
