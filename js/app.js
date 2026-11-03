@@ -1,7 +1,18 @@
 /* Start page of the Android app (/app.html): enter the company code once, choose Customer, Technician or Office,
    and the app opens that portal from then on. "Switch" inside the portals comes back here. */
-let firebaseConfig = null;
-try { ({ firebaseConfig } = await import('./firebase-config.js')); } catch (e) {}
+let firebaseConfig = null, SETTINGS = {};
+try { ({ firebaseConfig, SETTINGS = {} } = await import('./firebase-config.js')); } catch (e) {}
+// One company (companyCode in firebase-config.js): nobody is asked for a code.
+// Which company the site opens (platform/site, see core.js); a new empty site uses "main".
+let siteCo = '';
+if (!SETTINGS.companyCode && !SETTINGS.multiCompany && firebaseConfig?.apiKey) {
+  try { siteCo = localStorage.getItem('acsp-site') || ''; } catch (e) {}
+  if (!siteCo) try {
+    const r = await fetch(`https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents/platform/site?key=${firebaseConfig.apiKey}`);
+    if (r.ok) { siteCo = String((await r.json())?.fields?.company?.stringValue || ''); if (siteCo) localStorage.setItem('acsp-site', siteCo); }
+  } catch (e) {}
+}
+const DEFAULT_CO = String(SETTINGS.companyCode || siteCo || (SETTINGS.multiCompany ? '' : 'main')).trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
 const RESERVED = ['tech','admin','platform','assets','css','js','functions','index','sw','api','www'];
 const ROLES = [
@@ -13,7 +24,8 @@ const local = /^(localhost|127\.)/.test(location.hostname);
 // The Customer, Technician and Office apps each open one kind of portal; only the company code is asked.
 const LOCKED = (()=>{ let r=''; try{ r=window.AndroidApp?.role?.()||''; }catch(e){} r=r||new URLSearchParams(location.search).get('role')||''; return ROLES.some(x=>x.key===r)? r : ''; })();
 const SWITCHING = new URLSearchParams(location.search).get('switch')==='1';
-const pathFor = (co, role) => local ? `/${{customer:'index.html',technician:'tech.html',admin:'admin.html'}[role]}?c=${co}` : `/${co}${{customer:'',technician:'/tech',admin:'/admin'}[role]}`;
+const pathFor = (co, role) => local ? `/${{customer:'index.html',technician:'tech.html',admin:'admin.html'}[role]}?c=${co}`
+  : co === DEFAULT_CO ? {customer:'/', technician:'/tech', admin:'/admin'}[role] : `/${co}${{customer:'',technician:'/tech',admin:'/admin'}[role]}`;
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const $ = s => document.querySelector(s);
 
@@ -44,7 +56,7 @@ function render(){
       <button class="btn primary block lg" ${UI.busy?'disabled':''}>${UI.busy?'Checking…':'Continue'}</button></form>`;
   else right = `<div class="auth-card"><h2>How do you use ${esc(UI.company.name)}?</h2>
       <div class="role-pick">${ROLES.map(r=>`<button class="role-opt" data-role="${r.key}"><b>${r.title}</b><span>${r.text}</span></button>`).join('')}</div>
-      <button class="linkbtn" data-act="change">Use a different company</button></div>`;
+      ${DEFAULT_CO?'':'<button class="linkbtn" data-act="change">Use a different company</button>'}</div>`;
   $('#app').innerHTML = `<div class="auth"><section class="auth-hero"${heroStyle}><div class="brand" style="margin:0">${mark()}<div><b>${esc(UI.company?.name||'AC Service')}</b><small>${UI.company?'Choose your portal':'Welcome'}</small></div></div>
     <h1>${UI.company?'Nearly there.':LOCKED?ROLE_TEXT[LOCKED][0]:'Air-conditioning service, in your pocket.'}</h1>
     <p>${UI.company?'Pick how you use the app. You can switch later from the portal.':LOCKED?ROLE_TEXT[LOCKED][1]:'Book and track services, take jobs and run the office, all in one app.'}</p></section>
@@ -77,6 +89,13 @@ document.addEventListener('click', e => {
   const r = e.target.closest('[data-role]'); if (r) return go(r.dataset.role);
   if (e.target.closest('[data-act=change]')) { UI.company = null; UI.brand = null; UI.co = ''; try { window.AndroidApp?.setHome?.(''); } catch (e) {} render(); }
 });
-render();
-// Changing company in a single-role app starts from the code; otherwise reopen the saved company.
-if (UI.co && !(LOCKED && SWITCHING)) lookUp(UI.co);
+if (DEFAULT_CO) {
+  // One company: the Customer, Technician and Office apps open their portal straight away;
+  // the all-in-one app only asks how you use it.
+  UI.co = DEFAULT_CO;
+  if (LOCKED) go(LOCKED); else { render(); lookUp(DEFAULT_CO); }
+} else {
+  render();
+  // Changing company in a single-role app starts from the code; otherwise reopen the saved company.
+  if (UI.co && !(LOCKED && SWITCHING)) lookUp(UI.co);
+}
