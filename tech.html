@@ -41,6 +41,9 @@
       var R=['tech','admin','platform','assets','css','js','functions','index','sw','api','www'];
       var co=m?m[1].toLowerCase():(seg&&seg.indexOf('.')<0&&R.indexOf(seg)<0?seg:'');
       var local=/^(localhost|127\.)/.test(location.hostname);
+      /* One company (companyCode in firebase-config.js): it opens at / , /tech and /admin, no code needed. */
+      var def=localStorage.getItem('acsp-default')||'';
+      if(!co && def){ co=def; m=true; }
       if(!co){
         /* No company in the address: open the company used last time, so the code is entered only once. */
         if(/[?&]switch=1/.test(location.search)) return;
