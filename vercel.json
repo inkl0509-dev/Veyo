@@ -55,12 +55,36 @@
       "destination": "/platform.html"
     },
     {
+      "source": "/tech",
+      "destination": "/tech.html"
+    },
+    {
+      "source": "/admin",
+      "destination": "/admin.html"
+    },
+    {
+      "source": "/customer",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/:co/manifest-:p.webmanifest",
+      "destination": "/manifest-:p.webmanifest"
+    },
+    {
       "source": "/:co/tech",
       "destination": "/tech.html"
     },
     {
       "source": "/:co/admin",
       "destination": "/admin.html"
+    },
+    {
+      "source": "/:co/customer",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/:co/",
+      "destination": "/index.html"
     },
     {
       "source": "/:co",
