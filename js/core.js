@@ -964,6 +964,8 @@ function jobDetail(j){
   if(j.finishedAt) h+=workSec(j)+reportSec(j);
   h+=invoiceSec(j)+ratingSec(j)+messagesSec(j);
   if(s!=='cancelled' && !j.departedAt && (role==='provider' || (role==='customer' && PCFG().customerCancel))) h+=`<div class="sec"><div class="row"><button class="btn danger sm ${UI.confirm==='cancel'+j.id?'armed':''}" data-act="cancelJob" data-id="${j.id}">${UI.confirm==='cancel'+j.id?'Tap again to cancel this request':'Cancel request'}</button></div></div>`;
+  if(role==='provider') h+=`<div class="sec"><div class="row"><button class="btn danger sm ${UI.confirm==='deljob'+j.id?'armed':''}" data-act="delJob" data-id="${j.id}">${UI.confirm==='deljob'+j.id?'Tap again: delete permanently, with its quotation, invoice, payments and messages':'Delete this request permanently'}</button></div>
+    <p class="small muted">For mistakes and test entries. To keep a record, cancel instead.</p></div>`;
   return h;
 }
 function tracker(j){
@@ -997,6 +999,7 @@ function quoteSec(j){
   const editable=role==='provider' && !j.finishedAt && !j.cancelled && (!Q || Q.status!=='accepted');
   if(Q) h+= role==='customer' ? docFold('Quotation',Q,j,Q.status==='sent') : docView('Quotation',Q,j)+docActions('Quotation',Q,j);
   // Customers without the app answer by phone or in person: the office records it.
+  if(role==='provider' && Q && !j.invoice) h+=`<div class="row del-row"><button class="btn sm danger ${UI.confirm==='delq'+j.id?'armed':''}" data-act="delQuote" data-id="${j.id}">${UI.confirm==='delq'+j.id?'Tap again to delete the quotation':'Delete quotation'}</button></div>`;
   if(role==='provider' && Q?.status==='sent') h+=`<div class="callout"><b>Customer's answer</b><p class="small">If they replied by phone, WhatsApp or in person, record it here.</p>
     <div class="row"><button class="btn teal sm" data-act="officeQuote" data-v="accepted" data-id="${j.id}">Customer accepted</button><button class="btn sm" data-act="officeQuote" data-v="declined" data-id="${j.id}">Customer declined</button></div></div>`;
   if(Q?.status==='declined' && Q.reason) h+=`<div class="callout coral"><span class="label">Customer's reason</span><p>${esc(Q.reason)}</p></div>`;
@@ -1468,6 +1471,7 @@ function invoiceSec(j){
       <div class="grid3" style="margin-top:10px"><label class="field"><span>Method</span><select id="rp-m-${j.id}">${Object.entries(METHODS).map(([k,m])=>`<option value="${k}">${m.n}</option>`).join('')}</select></label>
       <label class="field"><span>Reference</span><input id="rp-r-${j.id}" placeholder="Transfer or receipt no."></label></div>
       <div class="row" style="margin-top:10px"><button class="btn" data-act="recordPay" data-id="${j.id}">Record ${money(I.total)} received</button></div></details>`;
+  if(role==='provider') h+=`<div class="row del-row"><button class="btn sm danger ${UI.confirm==='delinv'+j.id?'armed':''}" data-act="delInvoice" data-id="${j.id}">${UI.confirm==='delinv'+j.id?'Tap again: delete invoice'+(P?.status==='paid'?' and its payment':'')+' and their accounting entries':'Delete invoice'}</button></div>`;
   return h+`</div>`;
 }
 function payPanel(j){
@@ -1708,6 +1712,22 @@ const ACT = {
     run(async()=>{ await F.updateDoc(jobRef(j.id),{reportSentAt:nowISO()});
       await event(j,`Service report sent by ${myName()}`,['customer'],'Your service report is ready');
       await notify(j,[ME.role==='provider'?'tech':'office'],'Service report sent',`${j.no} · ${myName()} sent the service report to ${j.customerName||'the customer'}`); }, 'Report sent to the customer'); },
+  /* ---------- office: delete unwanted documents and figures ----------
+     Accounting stays balanced: an invoice's sale entry and its payment entry go with it. */
+  delInvoice(el){ const j=job(el.dataset.id), k='delinv'+j.id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
+    run(async()=>{ const b=F.writeBatch(db), no=j.invoice?.no;
+      b.update(jobRef(j.id), {invoice:F.deleteField(), payment:F.deleteField(), receipt:F.deleteField()});
+      b.delete(d('ledger','inv-'+j.id)); b.delete(d('ledger','pay-'+j.id)); b.delete(d('jobs',j.id,'files','receipt'));
+      await b.commit(); await log(j.id, `Invoice ${no} deleted by ${myName()}`); }, 'Invoice deleted and removed from Accounting'); },
+  delQuote(el){ const j=job(el.dataset.id), k='delq'+j.id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
+    run(async()=>{ const no=j.quote?.no; await F.updateDoc(jobRef(j.id), {quote:F.deleteField()}); delete UI.ed['q-'+j.id]; await log(j.id, `Quotation ${no} deleted by ${myName()}`); }, 'Quotation deleted'); },
+  delJob(el){ const j=job(el.dataset.id), k='deljob'+j.id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
+    run(async()=>{
+      const msgs=await F.getDocs(c('jobs',j.id,'messages'));
+      for(let i=0;i<msgs.docs.length;i+=400){ const b=F.writeBatch(db); msgs.docs.slice(i,i+400).forEach(x=>b.delete(x.ref)); await b.commit(); }
+      const b=F.writeBatch(db);
+      b.delete(d('ledger','inv-'+j.id)); b.delete(d('ledger','pay-'+j.id)); b.delete(d('jobs',j.id,'files','receipt')); b.delete(jobRef(j.id));
+      await b.commit(); UI.sel=''; }, `${j.no} deleted`); },
   sendInvoice(el){ const j=job(el.dataset.id), key='i-'+j.id, e=UI.ed[key];
     const lines=e.lines.filter(l=>String(l.desc).trim()).map(l=>({desc:String(l.desc).trim(),qty:+l.qty||0,rate:r2(l.rate)}));
     const methods=Object.keys(METHODS).filter(k=>e.methods[k]);
