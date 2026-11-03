@@ -48,9 +48,10 @@ function watch(){
 }
 function watchTenants(){
     if(unsubs.length) return;
+    unsubs.push(F.onSnapshot(F.doc(db,'platform','site'), s=>{ S.site=s.exists()? s.data().company : ''; S.siteLoaded=true; autoSite(); render(); }, ()=>{}));
     unsubs.push(F.onSnapshot(F.collection(db,'tenants'), async s=>{
       S.tenants=s.docs.map(x=>({...x.data(), id:x.id})).sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
-      S.loaded=true; render();
+      S.loaded=true; autoSite(); render();
       // Owner email (private) and whether the owner has finished setting up.
       await Promise.all(S.tenants.map(async t=>{
         if(!(t.id in S.invites)) S.invites[t.id]=(await F.getDoc(F.doc(db,'tenants',t.id,'config','invite')).catch(()=>null))?.data()?.ownerEmail||'';
@@ -58,6 +59,13 @@ function watchTenants(){
       }));
       render();
     }, e=>{ S.loaded=true; toast(errMsg(e)); render(); }));
+}
+
+// A site with exactly one company opens it at /, /tech and /admin: record it as the site's company.
+function autoSite(){
+  if(!S.siteLoaded || !S.loaded || S.site || S.tenants.length!==1 || S.autoSiteTried) return;
+  S.autoSiteTried=true;
+  F.setDoc(F.doc(db,'platform','site'), {company:S.tenants[0].id, at:nowISO(), by:S.user.uid}).catch(e=>console.warn('site',e));
 }
 
 /* ---------- views ---------- */
@@ -129,7 +137,7 @@ function tenantRow(t){
     <div class="row" style="justify-content:space-between;align-items:flex-start">
       <div style="min-width:0"><b class="t-name">${esc(t.name)}</b><div class="small muted"><span class="mono">${esc(t.id)}</span> · created ${fd(t.createdAt)}</div>
         <div class="small">${email?`Owner: ${esc(email)} · `:''}${owned===undefined?'':owned?'<span style="color:var(--teal-text);font-weight:700">Set up</span>':'<span style="color:var(--mango-text);font-weight:700">Waiting for the owner to set up</span>'}</div></div>
-      <div class="row">${t.status==='active'?'<span class="pill teal">Active</span>':'<span class="pill bad">Paused</span>'}
+      <div class="row">${S.site===t.id?'<span class="pill lagoon" title="Opens at the main address: /, /tech and /admin">Site company</span>':`<button class="btn sm" data-act="makeSite" data-id="${t.id}">Use at main address</button>`}${t.status==='active'?'<span class="pill teal">Active</span>':'<span class="pill bad">Paused</span>'}
         <button class="btn sm ${t.status==='active'?'danger':''} ${UI.confirm===k?'armed':''}" data-act="toggle" data-id="${t.id}">${t.status==='active'?(UI.confirm===k?'Tap again to pause':'Pause'):'Reactivate'}</button></div></div>
     ${link('customer')}${link('technician')}${link('admin')}
     ${owned===false?`<details class="small"><summary>Change owner email</summary><form class="row" data-form="invite" data-id="${t.id}" style="margin-top:8px"><input name="email" type="email" required value="${esc(email||'')}" style="max-width:280px"><button class="btn sm">Save</button></form></details>`:''}
@@ -139,6 +147,8 @@ function tenantRow(t){
 /* ---------- actions ---------- */
 const ACT = {
   async signOut(){ await A.signOut(auth); },
+  makeSite(el){ const id=el.dataset.id;
+    run(()=>F.setDoc(F.doc(db,'platform','site'), {company:id, at:nowISO(), by:S.user.uid}), `${S.tenants.find(t=>t.id===id)?.name||id} now opens at the main address. Customers don't need a code.`); },
   async copy(el){ try{ await navigator.clipboard.writeText(el.dataset.v); toast('Link copied'); }catch(e){ toast(el.dataset.v); } },
   toggle(el){ const t=S.tenants.find(x=>x.id===el.dataset.id), k='pause'+t.id;
     if(t.status==='active' && UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
