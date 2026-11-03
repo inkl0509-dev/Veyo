@@ -109,7 +109,8 @@ function custPicker(h, st, allowNew){
       <div class="grid2"><label class="field"><span>Name</span><input id="${h}-nc-name" value="${esc(st.ncName||'')}" data-np data-st="${h}" data-k="ncName" required></label>
       <label class="field"><span>Mobile</span><input id="${h}-nc-phone" type="tel" value="${esc(st.ncPhone||'')}" data-np data-st="${h}" data-k="ncPhone"></label>
       <label class="field"><span>Island / city</span><input id="${h}-nc-island" value="${esc(st.ncIsland||'')}" data-np data-st="${h}" data-k="ncIsland"></label>
-      <label class="field"><span>Address</span><input id="${h}-nc-addr" value="${esc(st.ncAddr||'')}" data-np data-st="${h}" data-k="ncAddr"></label></div>
+      <label class="field"><span>Address</span><input id="${h}-nc-addr" value="${esc(st.ncAddr||'')}" data-np data-st="${h}" data-k="ncAddr"></label>
+      <label class="field"><span>GST TIN <small class="muted">(optional, for businesses)</small></span><input id="${h}-nc-tin" value="${esc(st.ncTin||'')}" data-np data-st="${h}" data-k="ncTin"></label></div>
       <p class="small muted">Saved to Customers without a portal login. They get the documents from you (PDF or WhatsApp).</p>
       <div><button type="button" class="linkbtn" data-act="custSearch" data-h="${h}">← Search existing customers instead</button></div></div></div>`;
   const m=custMatches(st.cq);
@@ -150,6 +151,18 @@ async function deleteLogin(uid, fallback, who){
   }
 }
 /* ---------- customers ---------- */
+// Edit a customer's details (also updates their open requests, so technicians see the new address).
+function editCustForm(){
+  const cu=UI.editCust && S.customers.find(x=>x.id===UI.editCust); if(!cu) return '';
+  return `<form class="card edit-cust" data-form="editCustomer" data-id="${cu.id}"><div class="card-h"><h3>Edit customer</h3><button type="button" class="btn sm" data-act="editCustClose">Close</button></div><div class="card-b stack">
+    <label class="field"><span>Name</span><input id="ec-name" name="name" value="${esc(cu.name||'')}" required></label>
+    <label class="field"><span>Mobile</span><input id="ec-phone" name="phone" type="tel" value="${esc(cu.phone||'')}" required></label>
+    <label class="field"><span>Island / city</span><input id="ec-island" name="island" value="${esc(cu.island||'')}"></label>
+    <label class="field"><span>Address</span><input id="ec-address" name="address" value="${esc(cu.address||'')}"></label>
+    <label class="field"><span>GST TIN <small class="muted">(optional, for businesses)</small></span><input id="ec-tin" name="tin" value="${esc(cu.tin||'')}"></label>
+    ${cu.email?`<p class="small muted">Login email: ${esc(cu.email)} (the customer changes it themselves).</p>`:''}
+    <div class="row"><button class="btn primary">Save changes</button></div></div></form>`;
+}
 function userOf(id){ return S.users.find(u=>u.id===id); }
 function statusPill(u){ return !u? '<span class="pill mute">No login</span>' : (u.status||'active')==='active'? '<span class="pill teal">Active</span>' : '<span class="pill bad">Paused</span>'; }
 function customersView(){
@@ -158,18 +171,19 @@ function customersView(){
   return `<div class="cols" style="grid-template-columns:minmax(0,2fr) minmax(280px,1fr)">
     <div class="card"><div class="card-h"><h2>Customers</h2><input id="cust-q" type="search" placeholder="Search" value="${esc(UI.cq||'')}" data-input="cq" style="max-width:220px" aria-label="Search customers"></div>
     ${rows.length?`<div class="tscroll"><table class="t"><thead><tr><th>Name</th><th>Contact</th><th>Address</th><th>Portal login</th><th class="r">Requests</th><th class="r">Outstanding</th><th></th></tr></thead><tbody>
-    ${rows.map(({cu,u,n,due})=>`<tr><td><b>${esc(cu.name||'(no name yet)')}</b>${cu.guest?' <span class="pill mango" title="Booked without an account; their requests stay on their phone until they create one">Guest</span>':''}</td><td>${esc(cu.phone)}<br><span class="small muted">${esc(cu.email||'')}</span></td><td>${esc(cu.address)}${cu.island?', '+esc(cu.island):''}</td><td>${statusPill(u)}</td><td class="r">${n}</td><td class="r" style="${due?'color:var(--coral-text);font-weight:800':''}">${money(due)}</td>
-      <td><div class="row" style="flex-wrap:nowrap"><button class="btn sm" data-act="newJob" data-id="${cu.id}">Book</button>${u?`<button class="btn sm" data-act="toggleUser" data-id="${cu.id}">${(u.status||'active')==='active'?'Pause':'Activate'}</button><button class="btn sm danger ${UI.confirm==='dellogin'+cu.id?'armed':''}" data-act="delLogin" data-who="Customer login" data-id="${cu.id}" title="Deletes the login; their requests and invoices stay">${UI.confirm==='dellogin'+cu.id?'Tap again':'Delete login'}</button>`:''}</div></td></tr>`).join('')}
+    ${rows.map(({cu,u,n,due})=>`<tr><td><b>${esc(cu.name||'(no name yet)')}</b>${cu.guest?' <span class="pill mango" title="Booked without an account; their requests stay on their phone until they create one">Guest</span>':''}</td><td>${esc(cu.phone)}<br><span class="small muted">${esc(cu.email||'')}${cu.tin?`${cu.email?' · ':''}TIN ${esc(cu.tin)}`:''}</span></td><td>${esc(cu.address)}${cu.island?', '+esc(cu.island):''}</td><td>${statusPill(u)}</td><td class="r">${n}</td><td class="r" style="${due?'color:var(--coral-text);font-weight:800':''}">${money(due)}</td>
+      <td><div class="row" style="flex-wrap:nowrap"><button class="btn sm" data-act="editCust" data-id="${cu.id}">Edit</button><button class="btn sm" data-act="newJob" data-id="${cu.id}">Book</button>${u?`<button class="btn sm" data-act="toggleUser" data-id="${cu.id}">${(u.status||'active')==='active'?'Pause':'Activate'}</button><button class="btn sm danger ${UI.confirm==='dellogin'+cu.id?'armed':''}" data-act="delLogin" data-who="Customer login" data-id="${cu.id}" title="Deletes the login; their requests and invoices stay">${UI.confirm==='dellogin'+cu.id?'Tap again':'Delete login'}</button>`:''}</div></td></tr>`).join('')}
     </tbody></table></div>`:`<div class="empty"><h3>No customers yet</h3><p>Customers appear here when they sign up on the customer portal, or when you add them.</p></div>`}</div>
-    <form class="card" data-form="addCustomer"><div class="card-h"><h3>Add a customer</h3></div><div class="card-b stack">
+    ${editCustForm() || `<form class="card" data-form="addCustomer"><div class="card-h"><h3>Add a customer</h3></div><div class="card-b stack">
       <label class="field"><span>Name</span><input id="nc-name" name="name" required></label>
       <label class="field"><span>Mobile</span><input id="nc-phone" name="phone" required></label>
       <label class="field"><span>Island / city</span><input id="nc-island" name="island"></label>
       <label class="field"><span>Address</span><input id="nc-address" name="address"></label>
+      <label class="field"><span>GST TIN <small class="muted">(optional, for businesses)</small></span><input id="nc-tin" name="tin"></label>
       <label class="field"><span>Email (for a portal login)</span><input id="nc-email" name="email" type="email"></label>
       <label class="field"><span>Temporary password</span><input id="nc-pass" name="password" type="text" minlength="6" placeholder="Leave empty for no login"></label>
       <p class="small muted">With an email and password the customer can sign in to the customer portal and change their password with "Forgot password". Without them, you book on their behalf.</p>
-      <div><button class="btn primary">Add customer</button></div></div></form></div>`;
+      <div><button class="btn primary">Add customer</button></div></div></form>`}</div>`;
 }
 
 /* ---------- team: technicians and office staff ---------- */
@@ -249,8 +263,9 @@ function accountingView(){
         <div class="pl-row"><b>Total expenses</b><b>${money(exp)}</b></div>
         <div class="pl-row big"><span>Net profit</span><span style="color:${net<0?'var(--bad)':'var(--teal-text)'}">${money(net)}</span></div></div></div></div>
     <div class="card" style="margin-bottom:18px"><div class="card-h"><h3>Invoices</h3><span class="small muted">Click a row to open the job</span></div>
-      ${invoices.length?`<div class="tscroll"><table class="t"><thead><tr><th>Invoice</th><th>Customer</th><th>Issued</th><th>Due</th><th>Status</th><th class="r">Amount</th></tr></thead><tbody>
-      ${invoices.map(j=>`<tr class="click" data-act="gotoJob" data-id="${j.id}"><td class="mono">${esc(j.invoice.no)}</td><td>${esc(j.customerName||'')}</td><td>${fd(j.invoice.issuedAt)}</td><td>${fd(j.invoice.dueDate)}</td><td>${pill(j)}</td><td class="r">${money(j.invoice.total)}</td></tr>`).join('')}
+      ${invoices.length?`<div class="tscroll"><table class="t"><thead><tr><th>Invoice</th><th>Customer</th><th>Issued</th><th>Due</th><th>Status</th><th class="r">Amount</th><th></th></tr></thead><tbody>
+      ${invoices.map(j=>`<tr class="click" data-act="gotoJob" data-id="${j.id}"><td class="mono">${esc(j.invoice.no)}</td><td>${esc(j.customerName||'')}</td><td>${fd(j.invoice.issuedAt)}</td><td>${fd(j.invoice.dueDate)}</td><td>${pill(j)}</td><td class="r">${money(j.invoice.total)}</td>
+        <td class="r"><button class="btn sm danger ${UI.confirm==='delinv'+j.id?'armed':''}" data-act="delInvoice" data-id="${j.id}">${UI.confirm==='delinv'+j.id?'Tap again':'Delete'}</button></td></tr>`).join('')}
       </tbody></table></div>`:`<div class="empty"><p>Invoices you send appear here.</p></div>`}</div>
     <div class="cols">
       <div class="card"><div class="card-h"><h3>Account balances</h3><span class="small muted">Trial balance, all time</span></div><div class="tscroll">${trialBalance(all)}</div></div>
@@ -273,8 +288,10 @@ function trialBalance(b){
 function journal(){
   const es=[...S.ledger].sort((a,b)=>((b.date||'')+(b.at||'')).localeCompare((a.date||'')+(a.at||''))).slice(0,80);
   if(!es.length) return `<div class="empty"><p>Nothing posted yet. Sending an invoice posts the first entry.</p></div>`;
-  return `<div class="tscroll"><table class="t"><thead><tr><th>Date</th><th>Reference</th><th>Account</th><th class="r">Debit</th><th class="r">Credit</th></tr></thead><tbody>
-    ${es.map(e=>(e.lines||[]).map((l,i)=>`<tr>${i===0?`<td rowspan="${e.lines.length}">${fd(e.date)}</td><td rowspan="${e.lines.length}"><span class="mono">${esc(e.ref||'')}</span><br><span class="small muted">${esc(e.memo||'')}</span></td>`:''}<td style="${l.cr?'padding-left:26px':''}">${ACCTS[l.acct]?.n||esc(l.acct)}</td><td class="r">${l.dr?money(l.dr):''}</td><td class="r">${l.cr?money(l.cr):''}</td></tr>`).join('')).join('')}
+  const del=e=>{ const k='delent'+e.id, linked=/^(inv|pay)-/.test(e.id||'');
+    return `<button class="btn sm danger ${UI.confirm===k?'armed':''}" data-act="delEntry" data-id="${esc(e.id)}" title="${linked?'Also updates the invoice':'Delete this entry'}">${UI.confirm===k?(e.id.startsWith('inv-')?'Tap again: deletes the invoice too':e.id.startsWith('pay-')?'Tap again: marks the invoice unpaid':'Tap again'):'Delete'}</button>`; };
+  return `<div class="tscroll"><table class="t"><thead><tr><th>Date</th><th>Reference</th><th>Account</th><th class="r">Debit</th><th class="r">Credit</th><th></th></tr></thead><tbody>
+    ${es.map(e=>(e.lines||[]).map((l,i)=>`<tr>${i===0?`<td rowspan="${e.lines.length}">${fd(e.date)}</td><td rowspan="${e.lines.length}"><span class="mono">${esc(e.ref||'')}</span><br><span class="small muted">${esc(e.memo||'')}</span></td>`:''}<td style="${l.cr?'padding-left:26px':''}">${ACCTS[l.acct]?.n||esc(l.acct)}</td><td class="r">${l.dr?money(l.dr):''}</td><td class="r">${l.cr?money(l.cr):''}</td>${i===0?`<td rowspan="${e.lines.length}" class="r">${del(e)}</td>`:''}</tr>`).join('')).join('')}
   </tbody></table></div>`;
 }
 function chartSVG(t){
@@ -375,6 +392,15 @@ const actions = {
   period(el){ UI.period=el.dataset.v; saveUI(); render(); },
   gotoJob(el){ UI.ptab='jobs'; UI.filter='all'; UI.sel=el.dataset.id; UI.newJob=null; saveUI(); render(); scrollTo(0,0); },
   newJob(el){ UI.ptab='jobs'; UI.qi=null; UI.newJob={customerId:el.dataset.id||''}; render(); scrollTo(0,0); },
+  // A journal entry. Invoice and payment entries keep the request in step (no invoice left without its sale, etc.).
+  delEntry(el){ const id=el.dataset.id, k='delent'+id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
+    const jid=id.replace(/^(inv|pay)-/,''), j=/^(inv|pay)-/.test(id) && K.job(jid);
+    if(j && id.startsWith('inv-')){ UI.confirm='delinv'+jid; return K.ACT.delInvoice({dataset:{id:jid}}); }
+    run(async()=>{ const b=F.writeBatch(db); b.delete(d('ledger',id));
+      if(j && id.startsWith('pay-')) b.update(K.jobRef(jid), {payment:F.deleteField()});
+      await b.commit(); if(j) await log(jid, `Payment entry deleted by ${K.myName()}; the invoice is unpaid again`); }, j?'Payment deleted. The invoice shows as unpaid.':'Entry deleted'); },
+  editCust(el){ UI.editCust=el.dataset.id; render(); if(innerWidth<900) document.querySelector('.edit-cust')?.scrollIntoView({behavior:'smooth'}); },
+  editCustClose(){ UI.editCust=null; render(); },
   qiStart(el){ UI.ptab='jobs'; UI.newJob=null; UI.sel=''; delete UI.ed.qi; UI.qi={type:el.dataset.v||'quote', custId:el.dataset.id||'', cq:''}; render(); scrollTo(0,0); },
   qiCancel(){ UI.qi=null; delete UI.ed.qi; render(); },
   qiType(el){ UI.qi.type=el.dataset.v; const e=UI.ed.qi; if(e) e.notes = el.dataset.v==='invoice' ? 'Thank you for your business.' : 'Prices include labour. Parts or gas beyond the listed quantities are charged separately.'; render(); },
@@ -393,8 +419,8 @@ const actions = {
     run(async()=>{
       const at=nowISO();
       if(!cu){ const ref=F.doc(c('customers'));
-        cu={id:ref.id, name:st.ncName.trim(), phone:String(st.ncPhone||'').trim(), island:String(st.ncIsland||'').trim(), address:String(st.ncAddr||'').trim()};
-        await F.setDoc(ref, {name:cu.name, phone:cu.phone, email:'', island:cu.island, address:cu.address, hasLogin:false, createdAt:at}); }
+        cu={id:ref.id, name:st.ncName.trim(), phone:String(st.ncPhone||'').trim(), island:String(st.ncIsland||'').trim(), address:String(st.ncAddr||'').trim(), tin:String(st.ncTin||'').trim()};
+        await F.setDoc(ref, {name:cu.name, phone:cu.phone, email:'', island:cu.island, address:cu.address, tin:cu.tin, hasLogin:false, createdAt:at}); }
       const qno = inv? null : `Q-${today().slice(0,4)}-${K.pad(await K.nextNumber('quotes'))}`;
       const jref=F.doc(c('jobs'));
       const created=await F.runTransaction(db, async tx=>{
@@ -402,11 +428,11 @@ const actions = {
         let ic, is, inn; if(inv){ ic=d('counters','invoices'); is=await tx.get(ic); inn=(is.exists()?is.data().n:0)+1; }
         const data={no:'SR-'+(1000+n), customerId:cu.id, customerName:cu.name, customerPhone:cu.phone||'', serviceIds:[], units:1, acType:'', btu:'', island:cu.island||'', address:cu.address||'', issue:'', createdAt:at, bookedBy:'office', direct:true};
         if(inv){
-          const I={no:`INV-${today().slice(0,4)}-${K.pad(inn)}`, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, issuedAt:at, dueDate:addDays(today(),+e.dueDays||0), methods};
+          const I={no:`INV-${today().slice(0,4)}-${K.pad(inn)}`, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, customerTin:cu.tin||'', issuedAt:at, dueDate:addDays(today(),+e.dueDays||0), methods};
           const t=K.totals(I); Object.assign(I,{subtotal:t.net, gst:t.gst, total:t.total}); data.invoice=I;
           tx.set(ic,{n:inn});
           tx.set(d('ledger','inv-'+jref.id),{date:today(), at, ref:I.no, memo:`Invoice to ${cu.name}`, jobId:jref.id, lines:[{acct:'1100',dr:t.total},{acct:'4000',cr:t.net},{acct:'2100',cr:t.gst}].filter(l=>(l.dr||l.cr)>0)});
-        } else data.quote={no:qno, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, sentAt:at, validUntil:addDays(today(),14), status:'sent', rev:1};
+        } else data.quote={no:qno, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, customerTin:cu.tin||'', sentAt:at, validUntil:addDays(today(),14), status:'sent', rev:1};
         tx.set(jc,{n}); tx.set(jref,data); return data; });
       await log(jref.id, inv? `Invoice ${created.invoice.no} created by ${K.myName()}: ${money(created.invoice.total)}` : `Quotation ${qno} created by ${K.myName()}`);
       UI.qi=null; delete UI.ed.qi; UI.filter='all'; UI.sel=jref.id; saveUI(); scrollTo(0,0);
@@ -445,13 +471,23 @@ const forms = {
       b.set(d('users',uid),{name:dd.name, email, phone:dd.phone||'', role, status:'active', createdAt:nowISO(), createdBy:ME.user.uid});
       if(role==='technician') b.set(d('techs',uid),{name:dd.name, phone:dd.phone||'', email, skills:dd.skills||'', addedAt:nowISO()});
       await b.commit(); f.reset(); }, role==='technician'?'Technician login created':'Staff login created').finally(()=>btn.disabled=false); },
+  editCustomer(f,dd){ const id=f.dataset.id;
+    if(!dd.name || !dd.phone) return toast('Enter the name and mobile number.');
+    const data={name:dd.name, phone:dd.phone, island:dd.island||'', address:dd.address||'', tin:dd.tin||''};
+    run(async()=>{ const b=F.writeBatch(db);
+      b.update(d('customers',id), data);
+      if(userOf(id)) b.update(d('users',id), {name:dd.name, phone:dd.phone});
+      // Requests still in progress show the new details to the technician and on new documents.
+      S.jobs.filter(j=>j.customerId===id && !j.cancelled && j.payment?.status!=='paid')
+        .forEach(j=>b.update(K.jobRef(j.id), {customerName:dd.name, customerPhone:dd.phone, island:data.island, address:data.address}));
+      await b.commit(); UI.editCust=null; }, 'Customer details saved'); },
   addCustomer(f,dd){ const email=(dd.email||'').toLowerCase();
     if(email && !dd.password) return toast('Add a temporary password, or clear the email for a customer without a login.');
     const btn=f.querySelector('button'); btn.disabled=true;
     run(async()=>{ let id;
       if(email){ id=await createLogin(email, dd.password); await F.setDoc(d('users',id),{name:dd.name, email, phone:dd.phone, role:'customer', status:'active', createdAt:nowISO(), createdBy:ME.user.uid}); }
       else id=F.doc(c('customers')).id;
-      await F.setDoc(d('customers',id),{name:dd.name, phone:dd.phone, email, island:dd.island||'', address:dd.address||'', hasLogin:!!email, createdAt:nowISO()});
+      await F.setDoc(d('customers',id),{name:dd.name, phone:dd.phone, email, island:dd.island||'', address:dd.address||'', tin:dd.tin||'', hasLogin:!!email, createdAt:nowISO()});
       f.reset(); }, 'Customer added').finally(()=>btn.disabled=false); },
   adminBook(f,dd,fdata){ const cu=S.customers.find(x=>x.id===(UI.newJob?.customerId||dd.customerId)), svcs=fdata.getAll('svc');
     if(!cu) return toast('Choose a customer.'); if(!svcs.length) return toast('Choose at least one service.');
