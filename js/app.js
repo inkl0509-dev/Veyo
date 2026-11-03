@@ -14,7 +14,7 @@ if (!SETTINGS.companyCode && !SETTINGS.multiCompany && firebaseConfig?.apiKey) {
 }
 const DEFAULT_CO = String(SETTINGS.companyCode || siteCo || (SETTINGS.multiCompany ? '' : 'main')).trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
-const RESERVED = ['tech','admin','platform','assets','css','js','functions','index','sw','api','www'];
+const RESERVED = ['tech','admin','customer','platform','assets','css','js','functions','index','sw','api','www'];
 const ROLES = [
   {key:'customer', title:'Customer', text:'Book a service, follow your technician, pay and rate.'},
   {key:'technician', title:'Technician', text:'Accept jobs, share your trip, write work reports.'},
