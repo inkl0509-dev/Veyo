@@ -39,7 +39,10 @@ exports.pushNotification = onDocumentCreated(
     }
     if (!tokens.length) return;
 
-    const path = `/${co}` + (PATHS[item.portal] || '') + (item.chat ? `?chat=${encodeURIComponent(item.chat)}` : item.jobId ? `?job=${encodeURIComponent(item.jobId)}` : '');
+    // One-company site (platform/site): the portals live at /customer, /tech and /admin.
+    const site = await db.doc('platform/site').get();
+    const single = site.exists && site.data().company === co;
+    const path = (single ? ({ customer: '/customer', technician: '/tech', admin: '/admin' }[item.portal] || '/customer') : `/${co}` + (PATHS[item.portal] || '')) + (item.chat ? `?chat=${encodeURIComponent(item.chat)}` : item.jobId ? `?job=${encodeURIComponent(item.jobId)}` : '');
     const link = SITE_URL ? SITE_URL + path : undefined;
 
     const res = await getMessaging().sendEachForMulticast({
