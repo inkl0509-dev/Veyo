@@ -3,7 +3,7 @@
   "short_name": "AC Admin",
   "description": "Run the AC service desk.",
   "start_url": "./admin",
-  "scope": "/",
+  "scope": "./admin",
   "display": "standalone",
   "background_color": "#F1F6FA",
   "theme_color": "#0B2545",
@@ -24,5 +24,6 @@
       "type": "image/png",
       "purpose": "maskable"
     }
-  ]
+  ],
+  "id": "./admin"
 }
