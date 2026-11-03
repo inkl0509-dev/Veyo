@@ -3,7 +3,7 @@
   "short_name": "AC Tech",
   "description": "Your AC service jobs and live trips.",
   "start_url": "./tech",
-  "scope": "/",
+  "scope": "./tech",
   "display": "standalone",
   "background_color": "#F1F6FA",
   "theme_color": "#0E4D5C",
@@ -24,5 +24,6 @@
       "type": "image/png",
       "purpose": "maskable"
     }
-  ]
+  ],
+  "id": "./tech"
 }
