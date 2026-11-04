@@ -188,7 +188,7 @@ function detailsSec(j){
   const t=accepted(j)?tech(j.techId):null, ar=t?avgRating(t.id):null, phone=PCFG().showTechPhone && t?.phone;
   return `<div class="sec"><h3>Visit details</h3><div class="kv">
       <div><span class="label">When</span><b>${j.slot?slotText(j.slot):'Waiting for confirmation'}</b>${j.slot?'':`<span class="small muted">You asked for ${fd(j.preferredDate)}${j.window?', '+esc(WINDOWS[j.window].split(',')[0].toLowerCase()):''}</span>`}</div>
-      <div><span class="label">Where</span><b>${esc(j.address||'')}${j.island?', '+esc(j.island):''}</b></div>
+      <div><span class="label">Where</span><b>${esc(K.addrLine(j))}</b></div>
       <div><span class="label">Your AC</span><b>${esc(j.units||1)} × ${esc(j.acType||'AC')}</b><span class="small muted">${esc(j.btu||'')}</span></div>
       <div><span class="label">Services</span><b>${esc(jobTitle(j))}</b></div></div>
     ${j.issue?`<div class="callout"><span class="label">What you told us</span><p>${esc(j.issue)}</p></div>`:''}
@@ -303,7 +303,8 @@ function profileCard(me){
     <div class="grid2"><label class="field"><span>Full name</span><input id="pf-name" name="name" value="${esc(me?.name||ME.profile?.name||'')}" required></label>
     <label class="field"><span>Mobile</span><input id="pf-phone" name="phone" value="${esc(me?.phone||ME.profile?.phone||'')}" required></label>
     <label class="field"><span>Island / city</span><input id="pf-island" name="island" value="${esc(me?.island||'')}" required></label>
-    <label class="field"><span>Address</span><input id="pf-address" name="address" value="${esc(me?.address||'')}" required></label></div>
+    <label class="field"><span>Address</span><input id="pf-address" name="address" value="${esc(me?.address||'')}" required></label>
+    <label class="field"><span>GST TIN <small class="muted">(optional, for businesses: shown on your quotations and invoices)</small></span><input id="pf-tin" name="tin" value="${esc(me?.tin||'')}"></label></div>
     <div class="field"><span>Home location</span><div class="map small" data-map="pick-home"></div><div class="row"><span class="small muted" data-pickinfo="home"></span><button type="button" class="btn sm" data-act="locate" data-key="home">Use my current location</button></div></div>
     <div><button class="btn primary">Save my details</button></div></div></form>
   ${me?`<div class="stack">
@@ -365,7 +366,7 @@ const actions = {
 };
 const forms = {
   profile(f,dd){ const uid=ME.user.uid, p=UI.pick.home || pickDefault('home');
-    const data={name:dd.name, phone:dd.phone, island:dd.island, address:dd.address, email:ME.user.email||''}; if(p){ data.lat=p.lat; data.lng=p.lng; }
+    const data={name:dd.name, phone:dd.phone, island:dd.island, address:dd.address, tin:dd.tin||'', email:ME.user.email||''}; if(p){ data.lat=p.lat; data.lng=p.lng; }
     run(async()=>{ const b=F.writeBatch(db); b.set(d('customers',uid), myCustomer()? data : {...data, hasLogin:true, createdAt:nowISO()}, {merge:true}); b.update(d('users',uid),{name:dd.name, phone:dd.phone}); await b.commit(); UI.ctab='home'; saveUI(); }, 'Details saved'); }
 };
 document.addEventListener('input', e=>{ const k=e.target.dataset.bk; if(k && UI.bk) UI.bk[k] = e.target.type==='checkbox' ? e.target.checked : e.target.value; });
