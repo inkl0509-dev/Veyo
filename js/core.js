@@ -724,6 +724,17 @@ async function callAdmin(action, data){
   }
 }
 
+/* Back button in the Android apps: close what's open first, the app handles the rest. */
+window.__nativeBack = () => {
+  if(UI.modal){ UI.modal=null; render(); return true; }
+  if(UI.bell){ UI.bell=false; render(); return true; }
+  if(UI.qi || UI.newJob || UI.editCust){ UI.qi=null; UI.newJob=null; UI.editCust=null; render(); return true; }
+  if(UI.sel){ UI.sel=''; try{ saveUI(); }catch(e){} render(); scrollTo(0,0); return true; }
+  if(PORTAL==='customer' && UI.ctab && UI.ctab!=='home'){ UI.ctab='home'; UI.bk=null; try{ saveUI(); }catch(e){} render(); scrollTo(0,0); return true; }
+  if(PORTAL==='technician' && UI.tview && UI.tview!=='jobs'){ UI.tview='jobs'; render(); return true; }
+  return false;
+};
+
 /* ---------- update available ----------
    Every few minutes (and when the app comes back to the front) the portal checks whether its files changed on
    the server. If they did, a bar offers "Update", which reloads with the new version. */
