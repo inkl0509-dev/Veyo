@@ -169,10 +169,10 @@ function customersView(){
   const q=(UI.cq||'').toLowerCase();
   const rows=S.customers.filter(cu=>!q || [cu.name,cu.phone,cu.email,cu.island].join(' ').toLowerCase().includes(q)).map(cu=>{ const js=S.jobs.filter(j=>j.customerId===cu.id); const billed=js.filter(j=>j.invoice).reduce((a,j)=>a+j.invoice.total,0); const due=js.filter(j=>j.invoice&&j.payment?.status!=='paid').reduce((a,j)=>a+j.invoice.total,0); return {cu,u:userOf(cu.id),n:js.length,billed,due}; }).sort((a,b)=>b.due-a.due||String(a.cu.name).localeCompare(b.cu.name));
   return `<div class="cols" style="grid-template-columns:minmax(0,2fr) minmax(280px,1fr)">
-    <div class="card"><div class="card-h"><h2>Customers</h2><input id="cust-q" type="search" placeholder="Search" value="${esc(UI.cq||'')}" data-input="cq" style="max-width:220px" aria-label="Search customers"></div>
+    <div class="card"><div class="card-h"><h2>Customers</h2><div class="row"><button class="btn sm" data-act="shareLink" data-id="">Share portal link</button><input id="cust-q" type="search" placeholder="Search" value="${esc(UI.cq||'')}" data-input="cq" style="max-width:220px" aria-label="Search customers"></div></div>
     ${rows.length?`<div class="tscroll"><table class="t"><thead><tr><th>Name</th><th>Contact</th><th>Address</th><th>Portal login</th><th class="r">Requests</th><th class="r">Outstanding</th><th></th></tr></thead><tbody>
     ${rows.map(({cu,u,n,due})=>`<tr><td><b>${esc(cu.name||'(no name yet)')}</b>${cu.guest?' <span class="pill mango" title="Booked without an account; their requests stay on their phone until they create one">Guest</span>':''}</td><td>${esc(cu.phone)}<br><span class="small muted">${esc(cu.email||'')}${cu.tin?`${cu.email?' · ':''}TIN ${esc(cu.tin)}`:''}</span></td><td>${esc(K.addrLine(cu))}</td><td>${statusPill(u)}</td><td class="r">${n}</td><td class="r" style="${due?'color:var(--coral-text);font-weight:800':''}">${money(due)}</td>
-      <td><div class="row" style="flex-wrap:nowrap"><button class="btn sm" data-act="editCust" data-id="${cu.id}">Edit</button><button class="btn sm" data-act="newJob" data-id="${cu.id}">Book</button>${u?`<button class="btn sm" data-act="toggleUser" data-id="${cu.id}">${(u.status||'active')==='active'?'Pause':'Activate'}</button><button class="btn sm danger ${UI.confirm==='dellogin'+cu.id?'armed':''}" data-act="delLogin" data-who="Customer login" data-id="${cu.id}" title="Deletes the login; their requests and invoices stay">${UI.confirm==='dellogin'+cu.id?'Tap again':'Delete login'}</button>`:''}</div></td></tr>`).join('')}
+      <td><div class="row" style="flex-wrap:nowrap"><button class="btn sm wa" data-act="shareLink" data-id="${cu.id}" title="Send their portal link by WhatsApp or Viber">Share link</button><button class="btn sm" data-act="editCust" data-id="${cu.id}">Edit</button><button class="btn sm" data-act="newJob" data-id="${cu.id}">Book</button>${u?`<button class="btn sm" data-act="toggleUser" data-id="${cu.id}">${(u.status||'active')==='active'?'Pause':'Activate'}</button><button class="btn sm danger ${UI.confirm==='dellogin'+cu.id?'armed':''}" data-act="delLogin" data-who="Customer login" data-id="${cu.id}" title="Deletes the login; their requests and invoices stay">${UI.confirm==='dellogin'+cu.id?'Tap again':'Delete login'}</button>`:''}</div></td></tr>`).join('')}
     </tbody></table></div>`:`<div class="empty"><h3>No customers yet</h3><p>Customers appear here when they sign up on the customer portal, or when you add them.</p></div>`}</div>
     ${editCustForm() || `<form class="card" data-form="addCustomer"><div class="card-h"><h3>Add a customer</h3></div><div class="card-b stack">
       <label class="field"><span>Name</span><input id="nc-name" name="name" required></label>
@@ -399,6 +399,8 @@ const actions = {
     run(async()=>{ const b=F.writeBatch(db); b.delete(d('ledger',id));
       if(j && id.startsWith('pay-')) b.update(K.jobRef(jid), {payment:F.deleteField()});
       await b.commit(); if(j) await log(jid, `Payment entry deleted by ${K.myName()}; the invoice is unpaid again`); }, j?'Payment deleted. The invoice shows as unpaid.':'Entry deleted'); },
+  shareLink(el){ const cu=S.customers.find(x=>x.id===el.dataset.id);
+    K.shareModal(cu?`Send ${cu.name} the portal link`:'Share the customer portal link', K.inviteText(cu?{name:cu.name}:{name:''}, cu?.email?{email:cu.email}:null), cu?.phone||''); },
   editCust(el){ UI.editCust=el.dataset.id; render(); if(innerWidth<900) document.querySelector('.edit-cust')?.scrollIntoView({behavior:'smooth'}); },
   editCustClose(){ UI.editCust=null; render(); },
   qiStart(el){ UI.ptab='jobs'; UI.newJob=null; UI.sel=''; delete UI.ed.qi; UI.qi={type:el.dataset.v||'quote', custId:el.dataset.id||'', cq:''}; render(); scrollTo(0,0); },
@@ -488,7 +490,10 @@ const forms = {
       if(email){ id=await createLogin(email, dd.password); await F.setDoc(d('users',id),{name:dd.name, email, phone:dd.phone, role:'customer', status:'active', createdAt:nowISO(), createdBy:ME.user.uid}); }
       else id=F.doc(c('customers')).id;
       await F.setDoc(d('customers',id),{name:dd.name, phone:dd.phone, email, island:dd.island||'', address:dd.address||'', tin:dd.tin||'', hasLogin:!!email, createdAt:nowISO()});
-      f.reset(); }, 'Customer added').finally(()=>btn.disabled=false); },
+      f.reset();
+      // Send them their link (and login, if one was made) straight away.
+      K.shareModal(`Customer added: send ${dd.name} their link`, K.inviteText({name:dd.name}, email?{email, password:dd.password}:null), dd.phone);
+    }, 'Customer added').finally(()=>btn.disabled=false); },
   adminBook(f,dd,fdata){ const cu=S.customers.find(x=>x.id===(UI.newJob?.customerId||dd.customerId)), svcs=fdata.getAll('svc');
     if(!cu) return toast('Choose a customer.'); if(!svcs.length) return toast('Choose at least one service.');
     run(async()=>{ const ref=F.doc(c('jobs'));
