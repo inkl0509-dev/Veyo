@@ -724,6 +724,36 @@ async function callAdmin(action, data){
   }
 }
 
+/* ---------- update available ----------
+   Every few minutes (and when the app comes back to the front) the portal checks whether its files changed on
+   the server. If they did, a bar offers "Update", which reloads with the new version. */
+const UPD_FILES=['/js/core.js', `/js/${{customer:'customer',technician:'technician',admin:'admin'}[PORTAL]||'core'}.js`, '/css/styles.css', `/${PORTAL_URL[PORTAL]||'index.html'}`];
+let UPD_BASE=null, UPD_READY=false;
+async function filesStamp(){
+  const parts=await Promise.all(UPD_FILES.map(u=>fetch(u,{method:'HEAD', cache:'no-store'})
+    .then(r=>r.ok ? (r.headers.get('etag')||r.headers.get('last-modified')||r.headers.get('content-length')||'') : null).catch(()=>null)));
+  return parts.some(p=>p===null) ? null : parts.join('|');
+}
+async function checkUpdate(){
+  if(UPD_READY || !navigator.onLine || location.protocol==='file:') return;
+  const stamp=await filesStamp(); if(!stamp) return;
+  if(UPD_BASE===null){ UPD_BASE=stamp; return; }
+  if(stamp!==UPD_BASE){ UPD_READY=true; showUpdateBar(); }
+}
+function showUpdateBar(){
+  if(document.getElementById('upd-bar')) return;
+  const bar=document.createElement('div'); bar.id='upd-bar'; bar.setAttribute('role','status');
+  bar.innerHTML=`<span><b>Update available</b> A new version of the portal is ready.</span><button class="btn sm primary" type="button">Update</button>`;
+  bar.querySelector('button').onclick=async()=>{ bar.querySelector('button').textContent='Updating…';
+    try{ const r=await navigator.serviceWorker?.getRegistration(); await r?.update(); }catch(e){}
+    try{ localStorage.removeItem(`acsp-shell-${CO}-${PORTAL}`); }catch(e){}
+    location.reload(); };
+  document.body.appendChild(bar);
+}
+setTimeout(checkUpdate, 3000);
+setInterval(checkUpdate, 5*60*1000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) checkUpdate(); });
+
 /* ---------- render ---------- */
 const P = {view:()=> '', actions:{}, forms:{}, change:{}};
 let rq=false;
@@ -963,7 +993,7 @@ function jobDetail(j){
   if(role==='technician') h+=techNext(j);
   if(j.departedAt) h+=trackingSec(j);
   if(role==='technician') h+=`<div class="sec"><div class="row" style="justify-content:space-between"><span class="small muted">Questions about this job? Customers don't see this chat.</span><button class="btn sm" data-act="openChat" data-job="${j.id}">Message the office</button></div></div>`;
-  h+=requestSec(j)+scheduleSec(j)+quoteSec(j)+techSec(j);
+  h+=requestSec(j)+scheduleSec(j)+quoteSec(j)+techSec(j)+officeFinishSec(j);
   if(j.finishedAt) h+=workSec(j)+reportSec(j);
   h+=invoiceSec(j)+ratingSec(j)+messagesSec(j);
   if(s!=='cancelled' && !j.departedAt && (role==='provider' || (role==='customer' && PCFG().customerCancel))) h+=`<div class="sec"><div class="row"><button class="btn danger sm ${UI.confirm==='cancel'+j.id?'armed':''}" data-act="cancelJob" data-id="${j.id}">${UI.confirm==='cancel'+j.id?'Tap again to cancel this request':'Cancel request'}</button></div></div>`;
@@ -1332,8 +1362,42 @@ function printReport(){
   window.addEventListener('afterprint', done, {once:true}); window.print(); setTimeout(done, 60000);
 }
 
+/* The technician didn't tap "Mark job finished" in the app: the office settles it, with the same report. */
+function officeFinishSec(j){
+  if(ME.role!=='provider' || j.finishedAt || j.cancelled || j.direct) return '';
+  if(!(j.techId || j.departedAt || j.quote?.status==='accepted' || j.slot)) return '';
+  return `<details class="sec office-finish"${j.departedAt?' open':''}><summary><b>Job done but not marked in the technician app?</b> <span class="small muted">Finish it for them</span></summary>
+    <p class="small muted">Records it as done now, stops the technician's location sharing, and tells the customer. Add what was done if you know it.</p>
+    ${reportForm(j, 'of-'+j.id)}
+    <div class="row"><button class="btn teal" data-act="officeFinish" data-id="${j.id}">Mark job done</button></div></details>`;
+}
 /* ---------- invoice & payment ---------- */
 // Technicians only see whether the invoice is raised and whether it's paid, never an amount.
+/* ---------- send a link or message by WhatsApp, Viber or anything else ---------- */
+const customerLink = () => new URL(portalHref('customer'), location.href).href;
+function inviteText(cu, login){
+  const C=co();
+  return `Hello ${cu?.name||''}, welcome to ${C.name}!\nBook your AC service, follow your technician on the map, and see your quotations, invoices and service reports here:\n${customerLink()}`
+    + (login?.email ? `\n\nYour login\nEmail: ${login.email}${login.password?`\nPassword: ${login.password}`:''}` : '')
+    + (C.phone ? `\n\nQuestions? Call ${C.phone}.` : '');
+}
+function shareButtons(text, phone){
+  const wa = `https://wa.me/${phone?waNumber(phone):''}?text=${encodeURIComponent(text)}`;
+  return `<div class="share-btns"><a class="btn wa" target="_blank" rel="noopener" href="${wa}">WhatsApp</a>
+    <a class="btn viber" href="viber://forward?text=${encodeURIComponent(text)}">Viber</a>
+    <button class="btn" data-act="copyText" data-text="${esc(text)}">Copy</button>
+    ${navigator.share?`<button class="btn" data-act="shareText" data-text="${esc(text)}">More…</button>`:''}</div>`;
+}
+/** Window with the message (editable) and the buttons; used after adding a customer and from Customers. */
+function shareModal(title, text, phone){
+  UI.modal={title, html:`<label class="field"><span>Message</span><textarea id="share-text" rows="8" data-np>${esc(text)}</textarea></label>
+    <p class="small muted">${phone?`To ${esc(phone)}. `:''}Edit the message if you like, then choose how to send it.</p>
+    <div id="share-box">${shareButtons(text, phone)}</div>`, phone};
+  render();
+}
+document.addEventListener('input', e=>{ if(e.target.id!=='share-text') return;
+  const box=document.getElementById('share-box'); if(box) box.innerHTML=shareButtons(e.target.value, UI.modal?.phone); });
+
 /* ---------- PDF and image files of quotations, invoices and service reports ----------
    Made on the device (html2canvas + jsPDF, loaded only when needed), then saved or handed to the
    phone's share screen so it can go to WhatsApp as a real PDF or photo. The Android apps do the
@@ -1693,6 +1757,9 @@ const ACT = {
       <button class="btn ${ME.role!=='customer'?'wa':''}" data-act="reportShare" data-fmt="pdf" data-id="${j.id}">${ME.role!=='customer'?'Send PDF':'Share PDF'}</button>${ME.role!=='customer'?`<button class="btn wa" data-act="reportShare" data-fmt="img" data-id="${j.id}">Send as photo</button>`:''}
       <button class="btn" data-act="printReport">Print</button></div>`}; render(); },
   printReport(){ printReport(); },
+  async copyText(el){ const t=el.dataset.text; try{ await navigator.clipboard.writeText(t); toast('Copied. Paste it in any chat.'); }
+    catch(e){ const ta=document.getElementById('share-text'); if(ta){ ta.select(); document.execCommand('copy'); toast('Copied.'); } else toast("Couldn't copy."); } },
+  async shareText(el){ try{ await navigator.share({text:el.dataset.text}); }catch(e){} },
   printDoc(el){ const j=job(el.dataset.id), kind=el.dataset.kind, D=kind==='Invoice'?j.invoice:j.quote; if(!D) return;
     pdfLibs().catch(()=>{});   // get the PDF maker ready while the document is on screen
     UI.modal={title:`${kind} ${D.no}`, wide:true, html:docView(kind,D,j)+docActions(kind,D,j).replace('data-act="printDoc"','data-act="printReport"').replace('View / print','Print')}; render(); },
@@ -1731,6 +1798,11 @@ const ACT = {
       const b=F.writeBatch(db);
       b.delete(d('ledger','inv-'+j.id)); b.delete(d('ledger','pay-'+j.id)); b.delete(d('jobs',j.id,'files','receipt')); b.delete(jobRef(j.id));
       await b.commit(); UI.sel=''; }, `${j.no} deleted`); },
+  officeFinish(el){ const j=job(el.dataset.id), {notes, parts, report}=readReportForm(j, 'of-'+j.id), at=nowISO();
+    run(async()=>{
+      await F.updateDoc(jobRef(j.id), {finishedAt:at, arrivedAt:j.arrivedAt||at, workNotes:notes||'Work completed.', parts, report, finishedBy:'office', loc:F.deleteField(), trail:F.deleteField()});
+      await event(j, `Job marked done by the office (${myName()})`, ['customer','tech'], 'Your service is done');
+    }, 'Job marked done'); },
   sendInvoice(el){ const j=job(el.dataset.id), key='i-'+j.id, e=UI.ed[key];
     const lines=e.lines.filter(l=>String(l.desc).trim()).map(l=>({desc:String(l.desc).trim(),qty:+l.qty||0,rate:r2(l.rate)}));
     const methods=Object.keys(METHODS).filter(k=>e.methods[k]);
@@ -1857,4 +1929,4 @@ function start(def){
   render();
 }
 
-export { addrLine, SINGLE, DEFAULT_CO, custTin, callAdmin, ACCOUNT_PERKS, ISSUES, recommendServices, CHECKS, CONDITION, reportSec, reportDoc, waLink, waNumber, addMonths, printReport, A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
+export { inviteText, shareModal, customerLink, addrLine, SINGLE, DEFAULT_CO, custTin, callAdmin, ACCOUNT_PERKS, ISSUES, recommendServices, CHECKS, CONDITION, reportSec, reportDoc, waLink, waNumber, addMonths, printReport, A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
