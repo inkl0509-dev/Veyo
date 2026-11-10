@@ -714,3 +714,18 @@ body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5
   --bg:#fff; --surface:#fff; --surface-2:#F5F9FC; --ink:#0C2233; --muted:#526C80; --line:#D9E4ED; --shadow:none; color-scheme:light}
 .capture .doc,.capture .report-doc{box-shadow:none}
 .capture .tscroll{overflow:visible}
+
+/* Share by WhatsApp / Viber */
+.share-btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+.share-btns .btn{flex:1 1 110px;justify-content:center}
+.btn.viber{background:#7360F2;border-color:#6352d9;color:#fff}
+/* Office finishes a job */
+.office-finish>summary{cursor:pointer;padding:4px 0}
+.office-finish[open]>summary{margin-bottom:10px}
+/* Update available */
+#upd-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom));z-index:200;display:flex;align-items:center;gap:12px;
+  max-width:min(560px,calc(100vw - 24px));padding:10px 12px 10px 16px;border-radius:14px;background:var(--ink);color:var(--bg);box-shadow:0 10px 30px rgba(0,0,0,.25);font-size:.9rem}
+#upd-bar b{margin-right:6px}
+@media (min-width:900px){ #upd-bar{bottom:24px} }
+.share-btns a.btn{text-decoration:none}
+@media (max-width:899px){ #upd-bar{left:12px;right:12px;transform:none;max-width:none;justify-content:space-between} }
