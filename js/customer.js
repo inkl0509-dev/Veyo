@@ -309,7 +309,7 @@ function profileCard(me){
     <div><button class="btn primary">Save my details</button></div></div></form>
   ${me?`<div class="stack">
     <div class="card"><div class="card-h"><h3>Alerts</h3></div><div class="card-b stack">${pushPrompt()}<p class="small muted">You also see every update under the bell at the top.</p></div></div>
-    <div class="card"><div class="card-h"><h3>Account</h3></div><div class="card-b stack"><p class="small">${isGuest()?'Using the portal as a <b>guest</b> on this phone.':`Signed in as <b>${esc(ME.user.email||'')}</b>`}</p><div><button class="btn ${UI.confirm==='guestOut'?'danger armed':''}" data-act="signOut">${UI.confirm==='guestOut'?'Sign out anyway':'Sign out'}</button></div></div></div>
+    <div class="card"><div class="card-h"><h3>Account</h3></div><div class="card-b stack"><p class="small">${isGuest()?'Using the portal as a <b>guest</b> on this phone.':`Signed in as <b>${esc(ME.user.email||'')}</b>`}</p><div><button class="btn ${UI.confirm==='guestOut'?'danger armed':''}" data-act="signOut">${UI.confirm==='guestOut'?'Sign out anyway':'Sign out'}</button></div>${K.privacyLink()}</div></div>
     <div class="card"><div class="card-h"><h3>Contact ${esc(C.name)}</h3></div><div class="card-b stack small">${C.phone?`<a href="tel:${esc(C.phone.replace(/\s/g,''))}">${esc(C.phone)}</a>`:''}${C.email?`<span class="mono">${esc(C.email)}</span>`:''}<span class="muted">${esc(C.address||'')}</span></div></div>
   </div>`:''}</div>`;
 }
