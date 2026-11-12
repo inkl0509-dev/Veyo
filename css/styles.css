@@ -729,3 +729,5 @@ body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5
 @media (min-width:900px){ #upd-bar{bottom:24px} }
 .share-btns a.btn{text-decoration:none}
 @media (max-width:899px){ #upd-bar{left:12px;right:12px;transform:none;max-width:none;justify-content:space-between} }
+.privacy-link{text-align:center;font-size:13px;margin:12px 0 0}
+.privacy-link a{color:inherit;opacity:.75}
