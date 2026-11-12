@@ -55,6 +55,10 @@
       "destination": "/platform.html"
     },
     {
+      "source": "/privacy",
+      "destination": "/privacy.html"
+    },
+    {
       "source": "/tech",
       "destination": "/tech.html"
     },
