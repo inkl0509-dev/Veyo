@@ -1,6 +1,7 @@
 /* Admin / service-provider portal: runs the service desk and controls the customer and technician portals. */
 import * as K from './core.js';
 import { toolsView, toolActions } from './tools.js';
+import { exportCard, reportActions } from './reports.js';
 const { S, ME, UI, F, db, ACCTS, METHODS, WINDOWS, CUR, PORTAL_URL, PORTAL_NAME, portalLink, portalHref, tenantRef, CO,
   esc, money, r2, fd, fdt, today, addDays, nowISO, initials, stars, avgRating, hint, stage, jobTitle, job, sv, co, PCFG,
   balances, sideBal, pill, jobItem, jobDetail, run, toast, render, saveUI, d, c, log, event, createLogin, pickDefault, val, chatThread, chatUnread, ago, loaded, BRAND_PRESETS, brandPalette, readLogo, defaultMarkSvg } = K;
@@ -248,6 +249,7 @@ function accountingView(){
   const invoices=S.jobs.filter(j=>j.invoice).sort((a,b)=>(b.invoice.issuedAt||'').localeCompare(a.invoice.issuedAt||''));
   return `<div class="row" style="justify-content:space-between;margin-bottom:14px"><h2>Accounting</h2>
     <div class="chips">${[['month','This month'],['last','Last month'],['year','This year'],['all','All time']].map(([k,l])=>`<button class="chip" aria-pressed="${per===k}" data-act="period" data-v="${k}">${l}</button>`).join('')}</div></div>
+    ${exportCard()}
     <div class="kpis">
       <div class="kpi c0"><span class="label">Revenue · ${perLabel}</span><b>${money(income)}</b><span class="small">before GST</span></div>
       <div class="kpi c1"><span class="label">Expenses · ${perLabel}</span><b>${money(exp)}</b></div>
@@ -389,7 +391,7 @@ const actions = {
       'Brand saved. All portals now use it.').finally(()=>el.disabled=false); },
   ptab(el){ UI.ptab=el.dataset.v; UI.sel=''; UI.newJob=null; if(el.dataset.v!=='chat') UI.chatTech=''; saveUI(); render(); },
   filter(el){ UI.filter=el.dataset.v; saveUI(); render(); },
-  period(el){ UI.period=el.dataset.v; saveUI(); render(); },
+  ...reportActions,
   gotoJob(el){ UI.ptab='jobs'; UI.filter='all'; UI.sel=el.dataset.id; UI.newJob=null; saveUI(); render(); scrollTo(0,0); },
   newJob(el){ UI.ptab='jobs'; UI.qi=null; UI.newJob={customerId:el.dataset.id||''}; render(); scrollTo(0,0); },
   // A journal entry. Invoice and payment entries keep the request in step (no invoice left without its sale, etc.).
