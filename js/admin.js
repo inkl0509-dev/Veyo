@@ -2,6 +2,7 @@
 import * as K from './core.js';
 import { toolsView, toolActions } from './tools.js';
 import { exportCard, reportActions } from './reports.js';
+import { inventoryView, inventoryActions, inventoryChange, inventoryForms, lowCount } from './inventory.js';
 const { S, ME, UI, F, db, ACCTS, METHODS, WINDOWS, CUR, PORTAL_URL, PORTAL_NAME, portalLink, portalHref, tenantRef, CO,
   esc, money, r2, fd, fdt, today, addDays, nowISO, initials, stars, avgRating, hint, stage, jobTitle, job, sv, co, PCFG,
   balances, sideBal, pill, jobItem, jobDetail, run, toast, render, saveUI, d, c, log, event, createLogin, pickDefault, val, chatThread, chatUnread, ago, loaded, BRAND_PRESETS, brandPalette, readLogo, defaultMarkSvg } = K;
@@ -9,11 +10,11 @@ const { S, ME, UI, F, db, ACCTS, METHODS, WINDOWS, CUR, PORTAL_URL, PORTAL_NAME,
 function providerView(){
   const n=S.jobs.filter(j=>hint(j)).length;
   const unreadChats=S.techs.filter(t=>chatUnread(t.id)).length;
-  const tabs=[['jobs','Service requests',n],['chat','Team chat',unreadChats],['customers','Customers'],['team','Team'],['portals','Portal controls'],['accounting','Accounting'],['tools','Tools & reminders',dueSoon().filter(x=>x.overdue).length],['settings','Company & services']];
+  const tabs=[['jobs','Service requests',n],['chat','Team chat',unreadChats],['customers','Customers'],['team','Team'],['portals','Portal controls'],['accounting','Accounting'],['inventory','Inventory',lowCount()],['tools','Tools & reminders',dueSoon().filter(x=>x.overdue).length],['settings','Company & services']];
   let h=`<nav class="tabs" role="tablist">${tabs.map(([k,l,cnt])=>`<button role="tab" aria-selected="${UI.ptab===k}" data-act="ptab" data-v="${k}">${l}${cnt?`<span class="count">${cnt}</span>`:''}</button>`).join('')}</nav>`;
   if(!S.services.length || !S.company?.address) h+=`<div class="notice"><b>Finish setting up.</b> Add your address, GST TIN, bank accounts, office location and the services you offer. Customers see them when booking and on every quotation and invoice. <button class="linkbtn" data-act="ptab" data-v="settings">Open company settings</button></div>`;
   // Each tab waits only for its own data.
-  const NEEDS={tools:['customers'], customers:['customers','users'], team:['techs','users'], chat:['chats','techs'], accounting:['ledger'], settings:['services'], portals:[]};
+  const NEEDS={tools:['customers'], customers:['customers','users'], team:['techs','users'], chat:['chats','techs'], accounting:['ledger'], inventory:['items','stock','ledger'], settings:['services'], portals:[]};
   if(UI.ptab!=='jobs' && !loaded(...(NEEDS[UI.ptab]||[]))) return h+'<div class="loading">Loading…</div>';
   if(UI.ptab==='jobs') h+= UI.qi ? quickDocForm() : UI.newJob ? newJobForm() : providerJobs();
   else if(UI.ptab==='chat') h+=chatTab();
@@ -21,6 +22,7 @@ function providerView(){
   else if(UI.ptab==='team') h+=teamView();
   else if(UI.ptab==='portals') h+=portalsView();
   else if(UI.ptab==='accounting') h+=accountingView();
+  else if(UI.ptab==='inventory') h+=inventoryView();
   else if(UI.ptab==='tools') h+=toolsView(remindersCard());
   else h+=settingsView();
   return h;
@@ -413,7 +415,7 @@ const actions = {
   custNew(el){ const st=custHolder(el.dataset.h); st.newCust=true; if(st.cq && !/\d{3}/.test(st.cq)) st.ncName=st.cq; else if(st.cq) st.ncPhone=st.cq; render(); },
   custSearch(el){ const st=custHolder(el.dataset.h); st.newCust=false; render(); },
   qiSave(el){ const st=UI.qi, e=UI.ed.qi, inv=st.type==='invoice';
-    const lines=(e?.lines||[]).filter(l=>String(l.desc).trim()).map(l=>({desc:String(l.desc).trim(), qty:+l.qty||0, rate:r2(l.rate)}));
+    const lines=K.cleanLines(e?.lines);
     let cu=S.customers.find(x=>x.id===st.custId);
     if(!cu && !(st.newCust && String(st.ncName||'').trim())) return toast('Choose the customer, or add a new one.');
     if(!lines.length) return toast('Add at least one line.');
@@ -429,12 +431,13 @@ const actions = {
       const jref=F.doc(c('jobs'));
       const created=await F.runTransaction(db, async tx=>{
         const jc=d('counters','jobs'), js=await tx.get(jc), n=(js.exists()?js.data().n:0)+1;
-        let ic, is, inn; if(inv){ ic=d('counters','invoices'); is=await tx.get(ic); inn=(is.exists()?is.data().n:0)+1; }
+        let ic, is, inn, sr=[]; if(inv){ ic=d('counters','invoices'); is=await tx.get(ic); inn=(is.exists()?is.data().n:0)+1; sr=await K.stockRead(tx, lines); }
         const data={no:'SR-'+(1000+n), customerId:cu.id, customerName:cu.name, customerPhone:cu.phone||'', serviceIds:[], units:1, acType:'', btu:'', island:cu.island||'', address:cu.address||'', issue:'', createdAt:at, bookedBy:'office', direct:true};
         if(inv){
           const I={no:`INV-${today().slice(0,4)}-${K.pad(inn)}`, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, customerTin:cu.tin||'', issuedAt:at, dueDate:addDays(today(),+e.dueDays||0), methods};
           const t=K.totals(I); Object.assign(I,{subtotal:t.net, gst:t.gst, total:t.total}); data.invoice=I;
           tx.set(ic,{n:inn});
+          const used=K.stockOut(tx, sr, jref.id, I.no, cu.name, at); if(used.length) I.stock=used;
           tx.set(d('ledger','inv-'+jref.id),{date:today(), at, ref:I.no, memo:`Invoice to ${cu.name}`, jobId:jref.id, lines:[{acct:'1100',dr:t.total},{acct:'4000',cr:t.net},{acct:'2100',cr:t.gst}].filter(l=>(l.dr||l.cr)>0)});
         } else data.quote={no:qno, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, customerTin:cu.tin||'', sentAt:at, validUntil:addDays(today(),14), status:'sent', rev:1};
         tx.set(jc,{n}); tx.set(jref,data); return data; });
@@ -536,4 +539,4 @@ document.addEventListener('input', e=>{ const t=e.target;
   if(t.dataset.input==='custq'){ const st=custHolder(t.dataset.h); if(st){ st.cq=t.value; render(); } }
   if(t.dataset.st){ const st=custHolder(t.dataset.st); if(st) st[t.dataset.k]=t.value; } });
 
-K.start({view:providerView, actions, forms, change});
+K.start({view:providerView, actions:{...actions, ...inventoryActions}, forms:{...forms, ...inventoryForms}, change:{...change, ...inventoryChange}});
