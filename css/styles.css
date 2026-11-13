@@ -731,3 +731,11 @@ body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5
 @media (max-width:899px){ #upd-bar{left:12px;right:12px;transform:none;max-width:none;justify-content:space-between} }
 .privacy-link{text-align:center;font-size:13px;margin:12px 0 0}
 .privacy-link a{color:inherit;opacity:.75}
+/* accounts report download */
+.export-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px}
+.export-txt{flex:1 1 240px;display:flex;flex-direction:column;gap:2px;align-self:center}
+.export-row .field{flex:0 1 150px;margin:0}
+.export-btns{gap:8px}
+.btn.xl{background:#1d6f42;border-color:#1d6f42;color:#fff}
+.btn.xl:hover{filter:brightness(1.08)}
+@media (max-width:560px){.export-row .field{flex:1 1 40%}.export-btns{width:100%}.export-btns .btn{flex:1}}
