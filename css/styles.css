@@ -739,3 +739,19 @@ body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5
 .btn.xl{background:#1d6f42;border-color:#1d6f42;color:#fff}
 .btn.xl:hover{filter:brightness(1.08)}
 @media (max-width:560px){.export-row .field{flex:1 1 40%}.export-btns{width:100%}.export-btns .btn{flex:1}}
+.office-finish.late{border:1.5px solid var(--coral,#e8590c);border-radius:14px;padding:12px 14px;background:color-mix(in srgb, var(--coral,#e8590c) 7%, transparent);margin-bottom:14px}
+.office-finish.late>summary b{color:var(--coral-text,#b5420a)}
+/* inventory */
+.lstock{grid-column:1/-1;font-size:12px;color:var(--muted);margin:-2px 0 4px 2px}
+.lstock.warn{color:var(--coral-text,#b5420a);font-weight:600}
+.inv-head{display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between;align-items:center}
+.inv-table td{vertical-align:top}
+.inv-table .block,.small.block{display:block}
+.nowrap{white-space:nowrap}
+.neg{color:var(--coral-text,#b5420a);font-weight:600}
+.sm-pill{margin-left:6px;font-size:11px;padding:1px 7px}
+.inv-form{margin-bottom:16px}
+.inv-form .card-h{display:flex;justify-content:space-between;align-items:center}
+.buy-lines select{min-width:0;width:100%}
+@media (max-width:700px){ .inv-table td.nowrap{white-space:normal} .inv-table td.nowrap .btn{margin:2px 0} }
+@media (max-width:700px){ .inv-table .hide-sm{display:none} .inv-acts{display:flex;flex-direction:column;gap:4px;align-items:stretch} .inv-acts .btn{margin:0} }
