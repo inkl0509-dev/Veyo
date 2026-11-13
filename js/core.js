@@ -1147,6 +1147,9 @@ function techSec(j){
   if(showT){ const ar=avgRating(t.id); h+=`<div class="row"><span class="avatar">${initials(t.name)}</span><div><b>${esc(t.name)}</b><p class="small muted">${role==='customer' && !PCFG().showTechPhone ? '' : esc(t.phone||'')}${ar?' · '+stars(ar.avg)+' '+ar.avg.toFixed(1):''}</p></div></div>`; }
   if(role==='provider' && t) h+=`<div><button class="btn sm" data-act="openChat" data-id="${t.id}" data-job="${j.id}">Chat with ${esc(t.name.split(' ')[0])} about this job</button></div>`;
   if(role==='provider'){
+    if(t && !accepted(j) && !j.finishedAt && !j.cancelled){ const fn=esc(t.name.split(' ')[0]);
+      h+=`<div class="callout mango"><b>${fn} hasn't opened or accepted this job yet</b><p class="small">If you've spoken to ${fn}, accept it for them. If the work is already done, finish the job from here.</p>
+        <div class="row"><button class="btn sm" data-act="officeAccept" data-id="${j.id}">Accept for ${fn}</button><button class="btn sm primary" data-act="openFinish" data-id="${j.id}">Work already done? Finish the job</button></div></div>`; }
     if(j.declined && !j.techId) h+=`<div class="callout coral"><b>${esc(j.declined.name)} declined this job</b><p class="small">${fdt(j.declined.at)}${j.declined.reason?' · “'+esc(j.declined.reason)+'”':''}</p></div>`;
     if(j.open) h+=`<div class="callout"><p class="small">Offered to every technician ${j.offerAt?'since '+fdt(j.offerAt):''}. The first one to take it gets it, and you'll be notified.</p><div><button class="btn sm" data-act="stopOffer" data-id="${j.id}">Stop offering</button></div></div>`;
   }
@@ -1422,7 +1425,7 @@ function officeFinishSec(j){
   if(ME.role!=='provider' || j.finishedAt || j.cancelled || j.direct) return '';
   if(!(j.techId || j.departedAt || j.quote?.status==='accepted' || j.slot)) return '';
   const late=notDone(j), who=tech(j.techId)?.name||'The technician';
-  return `<details class="sec office-finish${late?' late':''}"${j.departedAt||late?' open':''}><summary><b>${late?`${esc(who)} hasn't marked this job done`:'Job done but not marked in the technician app?'}</b> <span class="small muted">${late?`The invoice is ${j.payment?.status==='paid'?'paid':'sent'}. Finish the job for them`:'Finish it for them'}</span></summary>
+  return `<details class="sec office-finish${late?' late':''}" id="finish-${j.id}"${j.departedAt||late||UI.finishOpen===j.id?' open':''}><summary><b>${late?`${esc(who)} hasn't marked this job done`:'Job done but not marked in the technician app?'}</b> <span class="small muted">${late?`The invoice is ${j.payment?.status==='paid'?'paid':'sent'}. Finish the job for them`:'Finish it for them'}</span></summary>
     <p class="small muted">Records it as done${late?'':' now'}, closes it in the technician's app, stops their location sharing, and tells the customer. Add what was done if you know it.</p>
     ${reportForm(j, 'of-'+j.id)}
     <div class="row"><button class="btn teal" data-act="officeFinish" data-id="${j.id}">Mark job done</button></div></details>`;
@@ -1864,11 +1867,15 @@ const ACT = {
       const b=F.writeBatch(db);
       b.delete(d('ledger','inv-'+j.id)); b.delete(d('ledger','pay-'+j.id)); b.delete(d('jobs',j.id,'files','receipt')); b.delete(jobRef(j.id));
       await b.commit(); UI.sel=''; }, `${j.no} deleted`); },
+  officeAccept(el){ const j=job(el.dataset.id), t=tech(j.techId); if(!t) return;
+    run(async()=>{ await F.updateDoc(jobRef(j.id), acceptFor(j, nowISO())); await event(j, `Accepted for ${t.name} by the office (${myName()})`, ['tech'], 'Job confirmed'); }, `Accepted for ${t.name.split(' ')[0]}`); },
+  openFinish(el){ const id=el.dataset.id; UI.finishOpen=id; render(); setTimeout(()=>{ const x=document.getElementById('finish-'+id); if(x){ x.open=true; x.scrollIntoView({behavior:'smooth', block:'start'}); } }, 60); },
   officeFinish(el){ const j=job(el.dataset.id), {notes, parts, report}=readReportForm(j, 'of-'+j.id);
     // If it was invoiced first, the work was done by then: date it no later than the invoice.
     const at=[nowISO(), j.invoice?.issuedAt, j.payment?.paidAt].filter(Boolean).sort()[0];
     run(async()=>{
-      await F.updateDoc(jobRef(j.id), {finishedAt:at, arrivedAt:j.arrivedAt||at, workNotes:notes||'Work completed.', parts, report, finishedBy:'office', finishedByName:myName(), loc:F.deleteField(), trail:F.deleteField()});
+      await F.updateDoc(jobRef(j.id), {finishedAt:at, arrivedAt:j.arrivedAt||at, workNotes:notes||'Work completed.', parts, report, finishedBy:'office', finishedByName:myName(), loc:F.deleteField(), trail:F.deleteField(), ...acceptFor(j, at)});
+      UI.finishOpen='';
       await event(j, `Job marked done by the office (${myName()})`, j.payment?.status==='paid'?['tech']:['customer','tech'], 'Your service is done');
     }, 'Job marked done'); },
   sendInvoice(el){ const j=job(el.dataset.id), key='i-'+j.id, e=UI.ed[key];
@@ -1926,12 +1933,14 @@ function payEntry(j, method, ref){
   const amt=j.invoice.total;
   return {date:today(), at:nowISO(), ref:j.invoice.no, memo:`Payment by ${METHODS[method]?.n||method}${ref?' · '+ref:''}`, jobId:j.id, lines:[{acct:METHODS[method]?.acct||'1000',dr:amt},{acct:'1100',cr:amt}]};
 }
+/** When the office acts for a technician who never accepted: mark the job as accepted too. */
+const acceptFor = (j, at) => j.techId && !accepted(j) ? {assignStatus:'accepted', acceptedAt:at, acceptedBy:'office'} : {};
 const finishBox = j => !j.finishedAt && !j.direct && !j.cancelled && !!document.getElementById('rp-f-'+j.id)?.checked;
 function settle(j, method, ref, okText, finish){
   run(async()=>{ const b=F.writeBatch(db), at=nowISO();
     const up={payment:{method,ref:ref||'',amount:j.invoice.total,status:'paid',verified:true,paidAt:at}};
     if(finish){ const t=[at, j.invoice?.issuedAt].filter(Boolean).sort()[0];
-      Object.assign(up, {finishedAt:t, arrivedAt:j.arrivedAt||t, workNotes:j.workNotes||'Work completed.', finishedBy:'office', finishedByName:myName(), loc:F.deleteField(), trail:F.deleteField()}); }
+      Object.assign(up, acceptFor(j, t), {finishedAt:t, arrivedAt:j.arrivedAt||t, workNotes:j.workNotes||'Work completed.', finishedBy:'office', finishedByName:myName(), loc:F.deleteField(), trail:F.deleteField()}); }
     b.update(jobRef(j.id), up);
     b.set(d('ledger','pay-'+j.id), payEntry(j,method,ref));
     await b.commit(); await event(j,`Payment of ${money(j.invoice.total)} received by ${METHODS[method]?.n||method}. Thank you!`,['customer'],'Payment confirmed');
