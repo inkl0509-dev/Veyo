@@ -1,1953 +1,220 @@
-/* AC Service Portal — shared core used by the three portals:
-   customer (index.html), technician (tech.html) and admin / service provider (admin.html).
-   Each portal page loads its own entry file, which registers its screens with start(). */
-// The config is loaded with a dynamic import so that a typo in it shows a readable message
-// on the page instead of a blank screen.
-let firebaseConfig = null, SETTINGS = {}, CONFIG_ERROR = '';
-try { ({ firebaseConfig, SETTINGS = {} } = await import('./firebase-config.js')); }
-catch (e) { CONFIG_ERROR = String(e && e.message || e); console.error('firebase-config.js', e); }
-SETTINGS = { currency:'MVR', timeZone:'Indian/Maldives', mapCenter:[4.1755,73.5093], avgSpeedKmh:22, gpsIntervalSec:12, vapidKey:'', ...SETTINGS };
+/* Inventory (office only): items kept in stock for AC jobs.
+   - Buy stock: adds to the quantity, updates the average cost, posts Stock (1200) against cash / bank.
+   - Use on an invoice: "+ Add from stock" on any quotation or invoice; sending the invoice takes it out of stock
+     (see stockOut in core.js) and moves its cost to Parts & refrigerant (5000). Deleting the invoice puts it back.
+   - Adjust: correct the count after counting, or write off damaged / lost items.
+   Data: tenants/{co}/items/{id} {name, code, category, unit, qty, cost (average), price, reorder, active}
+         tenants/{co}/stock/{id} one line per movement {itemId, name, type: bought|used|adjust|opening, qty (+/-), cost, date, ref, memo, billId} */
+import * as K from './core.js';
+const { S, UI, F, db, ACCTS, esc, money, r2, fd, today, nowISO, toast, render, run, d, c, item, qtyTxt, myName } = K;
 
-const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
-const CONFIGURED = !!firebaseConfig?.apiKey && !String(firebaseConfig.apiKey).startsWith('YOUR_');
-const PORTAL = document.body.dataset.portal || 'customer';            // customer | technician | admin
-const ROLE_OF = {customer:'customer', technician:'technician', admin:'provider'};
-const PORTAL_ROLE = ROLE_OF[PORTAL];
-const PORTAL_URL = {customer:'index.html', technician:'tech.html', admin:'admin.html'};
-// Running inside the Android app (it adds a JavaScript bridge called AndroidApp).
-const IN_APP = !!window.AndroidApp || /ACServiceApp/.test(navigator.userAgent);
-// The Customer, Technician and Office apps open one portal each (empty in the older all-in-one app).
-const APP_ROLE = (navigator.userAgent.match(/ACRole\/(\w+)/)||[])[1] || '';
-// iPhone / iPad (iPadOS reports itself as a Mac with touch). STANDALONE: opened from the Home Screen.
-const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints>1);
-const STANDALONE = matchMedia('(display-mode: standalone)').matches || navigator.standalone===true;
-/* ---------- which company ----------
-   Each company has its own code, used in the address: /reefside (customers), /reefside/tech, /reefside/admin.
-   ?c=reefside also works (handy for local testing). All of the company's data lives under tenants/{code}. */
-const RESERVED = ['tech','admin','customer','platform','assets','css','js','functions','index','sw','api','www'];
-// One company: set SETTINGS.companyCode in firebase-config.js. The site then opens that company at
-// /, /tech and /admin, and nobody is asked for a code.
-/* One company for the whole site. Which one is kept in platform/site (public), so existing data is used:
-   it's filled in the first time the office opens its existing portal, or the platform admin opens /platform.
-   A brand-new site with no company yet uses "main", set up by the office at /admin.
-   companyCode in firebase-config.js overrides it; multiCompany: true gives each company its own address. */
-const SITE_KEY='acsp-site';
-async function siteCompany(){
-  try{
-    const r=await fetch(`https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents/platform/site?key=${firebaseConfig.apiKey}`);
-    if(r.status===404) return '';
-    if(!r.ok) return null;
-    return String((await r.json())?.fields?.company?.stringValue||'');
-  }catch(e){ return null; }   // offline: keep what we had
-}
-let SITE_CO='', SITE_EMPTY=false;   // SITE_EMPTY: no company recorded for this site yet
-if(CONFIGURED && !SETTINGS.companyCode && !SETTINGS.multiCompany){
-  try{ SITE_CO=localStorage.getItem(SITE_KEY)||''; }catch(e){}
-  const fresh = SITE_CO ? null : await siteCompany();
-  if(fresh) SITE_CO=fresh;
-  if(fresh==='') SITE_EMPTY=true;
-  if(fresh!==null){ try{ fresh ? localStorage.setItem(SITE_KEY, fresh) : 0; }catch(e){} }
-  // Saved copy: check in the background and reload if the office moved the site to another company.
-  if(!fresh) siteCompany().then(c=>{ if(c && c!==SITE_CO){ try{ localStorage.setItem(SITE_KEY,c); }catch(e){} location.reload(); } });
-}
-/** The office of an existing company makes it the site's company (only if none is recorded yet). */
-async function claimSite(){
-  if(!SITE_EMPTY || SETTINGS.companyCode || SETTINGS.multiCompany || !CO) return;
-  SITE_EMPTY=false;
-  try{ await F.setDoc(F.doc(db,'platform','site'), {company:CO, at:nowISO(), by:ME.user.uid}); try{ localStorage.setItem(SITE_KEY, CO); }catch(e){}
-    if(CO!=='main') toast('This is now the company for your whole site: customers use the main address, no code needed.'); }
-  catch(e){ console.warn('site company', e); }
-}
-const DEFAULT_CO = String(SETTINGS.companyCode || SITE_CO || (SETTINGS.multiCompany ? '' : 'main')).trim().toLowerCase().replace(/[^a-z0-9-]/g,'');
-const FIRST_RUN_CO = 'main';   // this company can be created by its first office account, without /platform
-const CO = (()=>{
-  const q=(new URLSearchParams(location.search).get('c')||'').toLowerCase();
-  if(q) return q;
-  const seg=(location.pathname.split('/').filter(Boolean)[0]||'').toLowerCase();
-  return seg && !seg.includes('.') && !RESERVED.includes(seg) ? seg : DEFAULT_CO;
-})();
-const SINGLE = !!DEFAULT_CO && CO===DEFAULT_CO;
-try{ if(DEFAULT_CO) localStorage.setItem('acsp-default', DEFAULT_CO); else localStorage.removeItem('acsp-default'); }catch(e){}
-const PATH_MODE = !!CO && !new URLSearchParams(location.search).get('c');
-/** Link to a portal of this company, optionally with ?job=… or ?chat=… */
-function portalHref(p, params){
-  const q=new URLSearchParams(params||{}), qs=q.toString()?'?'+q:'';
-  if(PATH_MODE && SINGLE) return `${{customer:'/customer',technician:'/tech',admin:'/admin'}[p]}${qs}`;
-  if(PATH_MODE) return `/${CO}${{customer:'',technician:'/tech',admin:'/admin'}[p]}${qs}`;
-  q.set('c', CO); return `/${PORTAL_URL[p]}?${q}`;
-}
-const PORTAL_NAME = {customer:'Customer portal', technician:'Technician portal', admin:'Admin portal'};
-const portalLink = p => new URL(portalHref(p), location.href).href;
+const UNITS = ['pcs','kg','g','m','ft','roll','can','bottle','litre','set','box','pair'];
+const CATS = ['Gas / refrigerant','Parts','Pipes & insulation','Electrical','Consumables','Brackets & fittings','Tools','Other'];
+const PAY_FROM = [['1000','Cash'],['1010','BML bank account'],['1020','MIB bank account'],['3000','Owner paid (own money)']];
+const REASONS = ['Counted the stock','Damaged / broken','Lost / missing','Used without an invoice (warranty, own use)','Returned to supplier','Found extra'];
 
-let A, F, appMod, auth, db, fbApp;
-if (CONFIGURED) {
-  const [app, authMod, fsMod] = await Promise.all([import(FB + 'firebase-app.js'), import(FB + 'firebase-auth.js'), import(FB + 'firebase-firestore.js')]);
-  appMod = app; A = authMod; F = fsMod;
-  // A separately named Firebase app per portal keeps each portal's sign-in separate in the same browser.
-  // A separate Firebase app per company and portal keeps every sign-in separate, even in the same browser.
-  fbApp = app.initializeApp(firebaseConfig, `portal-${CO||'none'}-${PORTAL}`);
-  auth = A.getAuth(fbApp);
-  // Keep a copy of this company's data on the device, so the next visit shows it straight away
-  // while fresh data loads in the background. Falls back to memory where the browser can't (private mode).
-  try{ db = F.initializeFirestore(fbApp, {ignoreUndefinedProperties:true, localCache:F.persistentLocalCache({tabManager:F.persistentMultipleTabManager()})}); }
-  catch(e){ db = F.initializeFirestore(fbApp, {ignoreUndefinedProperties:true}); }
+const low = it => (+it.reorder||0)>0 && (+it.qty||0) <= +it.reorder;
+const value = it => r2(Math.max(0,+it.qty||0)*(+it.cost||0));
+const items = () => [...S.items].sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+const newId = col => F.doc(c(col)).id;
+export const lowCount = () => S.items.filter(x=>x.active!==false && low(x)).length;
+
+/* ---------- the tab ---------- */
+export function inventoryView(){
+  const st=UI.inv||{}, q=(UI.invq||'').trim().toLowerCase(), f=UI.invf||'all';
+  let list=items().filter(x=>f==='hidden' ? x.active===false : x.active!==false);
+  if(f==='low') list=list.filter(low);
+  if(q) list=list.filter(x=>[x.name,x.code,x.category].join(' ').toLowerCase().includes(q));
+  const act=S.items.filter(x=>x.active!==false), total=r2(act.reduce((a,x)=>a+value(x),0)), lc=lowCount();
+  const bookV=K.sideBal('1200', K.balances(S.ledger));
+  let h=`<div class="row" style="justify-content:space-between;margin-bottom:14px"><h2>Inventory</h2>
+    <div class="row"><button class="btn sm" data-act="invOpen" data-mode="hist">Stock history</button><button class="btn sm" data-act="invOpen" data-mode="new">+ New item</button><button class="btn sm coral" data-act="invOpen" data-mode="buy">+ Buy stock</button></div></div>
+    <div class="kpis inv-kpis">
+      <div class="kpi c0"><span class="label">Items in stock</span><b>${act.filter(x=>+x.qty>0).length}</b><span class="small">of ${act.length} items</span></div>
+      <div class="kpi c2"><span class="label">Stock value (cost)</span><b>${money(total)}</b><span class="small">${Math.abs(bookV-total)>0.5?`In Accounting: ${money(bookV)}`:'Matches Accounting'}</span></div>
+      <div class="kpi ${lc?'c1':'c3'}"><span class="label">Low stock</span><b>${lc}</b><span class="small">${lc?'Time to buy more':'All good'}</span></div>
+    </div>`;
+  if(st.mode==='new' || st.mode==='edit') h+=itemForm(st.mode==='edit'?item(st.id):null);
+  else if(st.mode==='buy') h+=buyForm();
+  else if(st.mode==='adjust') h+=adjustForm(item(st.id));
+  else if(st.mode==='hist') h+=historyCard(st.id);
+  h+=`<div class="card"><div class="card-h inv-head"><div class="chips">${[['all','All'],['low',`Low stock${lc?` (${lc})`:''}`],['hidden','Hidden']].map(([k,l])=>`<button class="chip" aria-pressed="${f===k}" data-act="invFilter" data-v="${k}">${l}</button>`).join('')}</div>
+      <input id="invq" type="search" placeholder="Search items" value="${esc(UI.invq||'')}" data-input="invq" aria-label="Search items" style="max-width:260px"></div>`;
+  if(!S.items.length) h+=`<div class="empty"><h3>No items yet</h3><p>Add the parts and gas you keep in stock (gas, capacitors, pipes, brackets…). Then buy stock, and add items to invoices with "+ Add from stock".</p><button class="btn primary" data-act="invOpen" data-mode="new">+ New item</button></div>`;
+  else if(!list.length) h+=`<div class="empty"><p>No items match.</p></div>`;
+  else h+=`<div class="tscroll"><table class="t inv-table"><thead><tr><th>Item</th><th class="r">In stock</th><th class="r hide-sm">Avg cost</th><th class="r">Sell price</th><th class="r hide-sm">Value</th><th></th></tr></thead><tbody>
+    ${list.map(x=>`<tr><td><b>${esc(x.name)}</b><span class="small muted block">${[x.code, x.category].filter(Boolean).map(esc).join(' · ')}</span></td>
+      <td class="r"><span class="${+x.qty<0?'neg':''}">${qtyTxt(x.qty, x.unit)}</span>${low(x)?`<span class="pill coral sm-pill">Low</span>`:''}${x.reorder?`<span class="small muted block">low at ${qtyTxt(x.reorder)}</span>`:''}</td>
+      <td class="r hide-sm">${money(x.cost||0)}</td><td class="r">${money(x.price||0)}</td><td class="r hide-sm">${money(value(x))}</td>
+      <td class="r nowrap inv-acts"><button class="btn sm" data-act="invOpen" data-mode="buy" data-id="${x.id}">Buy</button> <button class="btn sm" data-act="invOpen" data-mode="adjust" data-id="${x.id}">Adjust</button> <button class="btn sm" data-act="invOpen" data-mode="edit" data-id="${x.id}">Edit</button> <button class="btn sm" data-act="invOpen" data-mode="hist" data-id="${x.id}">History</button></td></tr>`).join('')}
+    </tbody></table></div>`;
+  return h+`</div><p class="small muted" style="margin-top:10px">Add stock items to a quotation or invoice with <b>+ Add from stock</b>. Sending the invoice takes them out of stock and moves their cost to Parts & refrigerant in Accounting. Deleting the invoice puts them back.</p>`;
 }
-/* ---------- constants ---------- */
-const TZ = SETTINGS.timeZone || 'Indian/Maldives';
-const CUR = SETTINGS.currency || 'MVR';
-const ACCTS = {
-  '1000':{n:'Cash on hand',t:'asset'}, '1010':{n:'BML bank account',t:'asset'}, '1020':{n:'MIB bank account',t:'asset'},
-  '1030':{n:'Card settlements',t:'asset'}, '1100':{n:'Accounts receivable',t:'asset'},
-  '2100':{n:'GST payable',t:'liability'}, '3000':{n:"Owner's equity",t:'equity'},
-  '4000':{n:'Service revenue',t:'income'},
-  '5000':{n:'Parts & refrigerant',t:'expense'}, '5100':{n:'Technician wages',t:'expense'}, '5200':{n:'Fuel & boat transport',t:'expense'},
-  '5300':{n:'Rent & utilities',t:'expense'}, '5900':{n:'Other expenses',t:'expense'}
+
+/* ---------- new / edit item ---------- */
+function itemForm(it){
+  const v=(k,dflt='')=>esc(it?.[k]??dflt), sel=(opts,cur)=>opts.map(o=>`<option${o===cur?' selected':''}>${esc(o)}</option>`).join('');
+  return `<div class="card inv-form"><div class="card-h"><h3>${it?'Edit item':'New stock item'}</h3><button class="icon" data-act="invClose" aria-label="Close">×</button></div>
+    <form class="card-b stack" data-form="invItem" data-id="${it?.id||''}">
+      <div class="grid3"><label class="field" style="grid-column:span 2"><span>Name</span><input name="name" required value="${v('name')}" placeholder="e.g. R32 refrigerant gas"></label>
+        <label class="field"><span>Code (optional)</span><input name="code" value="${v('code')}" placeholder="SKU or part no."></label></div>
+      <div class="grid3"><label class="field"><span>Category</span><select name="category">${sel(CATS, it?.category||'Parts')}</select></label>
+        <label class="field"><span>Unit</span><select name="unit">${sel(UNITS, it?.unit||'pcs')}</select></label>
+        <label class="field"><span>Low stock at</span><input name="reorder" type="number" min="0" step="any" value="${v('reorder',0)}"></label></div>
+      <div class="grid3"><label class="field"><span>Selling price (${K.CUR}, before GST)</span><input name="price" type="number" min="0" step="0.01" value="${v('price',0)}"></label>
+        ${it?`<label class="field"><span>Show in lists</span><select name="active"><option value="1"${it.active!==false?' selected':''}>Yes</option><option value="0"${it.active===false?' selected':''}>No, hide it</option></select></label>`
+        :`<label class="field"><span>Already in stock (qty)</span><input name="openQty" type="number" min="0" step="any" value="0"></label>
+          <label class="field"><span>Cost of each (${K.CUR})</span><input name="openCost" type="number" min="0" step="0.01" value="0"></label>`}</div>
+      ${it?'':`<p class="small muted">Stock you already have is added as opening stock (Stock against Owner's equity). Buy new stock with "+ Buy stock" so it's paid from cash or bank.</p>`}
+      <div class="row"><button class="btn primary">${it?'Save item':'Add item'}</button><button class="btn" type="button" data-act="invClose">Cancel</button>
+        ${it?`<span style="flex:1"></span><button class="btn sm danger ${UI.confirm==='delitem'+it.id?'armed':''}" type="button" data-act="invDelItem" data-id="${it.id}">${UI.confirm==='delitem'+it.id?(+it.qty?'Only items with 0 in stock can be deleted':'Tap again to delete'):'Delete item'}</button>`:''}</div>
+    </form></div>`;
+}
+
+/* ---------- buy stock (one supplier bill, several items) ---------- */
+function buyState(){
+  if(!UI.buy){ const it=item(UI.inv?.id); UI.buy={lines:[{itemId:it?.id||'', qty:1, cost:it?+it.lastCost||+it.cost||0:0}], supplier:'', ref:'', date:today(), from:'1000'}; }
+  return UI.buy;
+}
+function buyForm(){
+  const B=buyState(), all=items().filter(x=>x.active!==false), tot=r2(B.lines.reduce((a,l)=>a+(+l.qty||0)*(+l.cost||0),0));
+  return `<div class="card inv-form"><div class="card-h"><h3>Buy stock</h3><button class="icon" data-act="invClose" aria-label="Close">×</button></div><div class="card-b stack">
+    <div class="grid3"><label class="field"><span>Supplier</span><input id="buy-supplier" data-np data-buy="supplier" value="${esc(B.supplier)}" placeholder="Shop or company"></label>
+      <label class="field"><span>Bill / receipt no.</span><input id="buy-ref" data-np data-buy="ref" value="${esc(B.ref)}"></label>
+      <label class="field"><span>Date</span><input id="buy-date" type="date" data-np data-buy="date" value="${esc(B.date)}"></label></div>
+    <div class="lines buy-lines"><div class="lrow lhead"><span>Item</span><span>Qty</span><span>Cost each</span><span class="lamt">Amount</span><span></span></div>
+    ${B.lines.map((l,i)=>{ const it=item(l.itemId); return `<div class="lrow">
+      <select id="buy-i${i}" data-np data-buy="lines.${i}.itemId" data-change="buyItem" aria-label="Item"><option value="">Choose an item…</option>${all.map(x=>`<option value="${x.id}"${x.id===l.itemId?' selected':''}>${esc(x.name)} (${qtyTxt(x.qty,x.unit)} now)</option>`).join('')}</select>
+      <input id="buy-q${i}" data-np data-buy="lines.${i}.qty" type="number" min="0" step="any" value="${esc(l.qty)}" aria-label="Quantity">
+      <input id="buy-c${i}" data-np data-buy="lines.${i}.cost" type="number" min="0" step="0.01" value="${esc(l.cost)}" aria-label="Cost each">
+      <span class="lamt mono" data-buyamt="${i}">${money((+l.qty||0)*(+l.cost||0))}</span>
+      <button class="icon" data-act="buyRm" data-i="${i}" aria-label="Remove line">×</button></div>${it?`<div class="lstock">${esc(it.unit||'pcs')} · average cost now ${money(it.cost||0)}</div>`:''}`; }).join('')}
+    <div class="row" style="margin-top:4px"><button class="btn sm" data-act="buyAdd">+ Another item</button><button class="btn sm" data-act="invOpen" data-mode="new" data-back="buy">+ New item</button></div></div>
+    <div class="row" style="justify-content:space-between;align-items:flex-end">
+      <label class="field" style="max-width:240px"><span>Paid from</span><select id="buy-from" data-np data-buy="from">${PAY_FROM.map(([k,n])=>`<option value="${k}"${B.from===k?' selected':''}>${n}</option>`).join('')}</select></label>
+      <div class="tot"><span class="grand">Total</span><span class="grand" id="buy-total">${money(tot)}</span></div></div>
+    <p class="small muted">Adds the items to stock and records the payment in Accounting (Stock, paid from ${esc(PAY_FROM.find(x=>x[0]===B.from)?.[1]||'cash')}). Enter costs including any GST you paid.</p>
+    <div class="row"><button class="btn primary" data-act="buySave">Add to stock</button><button class="btn" data-act="invClose">Cancel</button></div>
+  </div></div>`;
+}
+
+/* ---------- adjust (count, damaged, lost…) ---------- */
+function adjustForm(it){
+  if(!it) return '';
+  const A=UI.adj||(UI.adj={count:String(+it.qty||0), reason:REASONS[0], memo:''}), diff=r2((+A.count||0)-(+it.qty||0));
+  return `<div class="card inv-form"><div class="card-h"><h3>Adjust stock · ${esc(it.name)}</h3><button class="icon" data-act="invClose" aria-label="Close">×</button></div><div class="card-b stack">
+    <div class="grid3"><label class="field"><span>In the system</span><input value="${esc(qtyTxt(it.qty,it.unit))}" disabled></label>
+      <label class="field"><span>Actual quantity now</span><input id="adj-count" data-np data-adj="count" type="number" step="any" value="${esc(A.count)}"></label>
+      <label class="field"><span>Change</span><input id="adj-diff" value="${diff>0?'+':''}${qtyTxt(diff,it.unit)} · ${money(Math.abs(diff)*(+it.cost||0))}" disabled></label></div>
+    <div class="grid2"><label class="field"><span>Reason</span><select id="adj-reason" data-np data-adj="reason">${REASONS.map(r=>`<option${r===A.reason?' selected':''}>${esc(r)}</option>`).join('')}</select></label>
+      <label class="field"><span>Note (optional)</span><input id="adj-memo" data-np data-adj="memo" value="${esc(A.memo)}"></label></div>
+    <p class="small muted">The difference, at average cost, goes to Parts & refrigerant in Accounting (a loss when stock goes down, a gain when it goes up).</p>
+    <div class="row"><button class="btn primary" data-act="adjSave" data-id="${it.id}">Save adjustment</button><button class="btn" data-act="invClose">Cancel</button></div>
+  </div></div>`;
+}
+
+/* ---------- history ---------- */
+const TYPE = {bought:['Bought','teal'], used:['Used on invoice','lagoon'], adjust:['Adjusted','coral'], opening:['Opening stock','']};
+function historyCard(id){
+  const it=id?item(id):null, list=S.stock.filter(m=>!id||m.itemId===id).slice(0,300);
+  return `<div class="card inv-form"><div class="card-h"><h3>${it?'History · '+esc(it.name):'Stock history'}</h3><button class="icon" data-act="invClose" aria-label="Close">×</button></div>
+    ${list.length?`<div class="tscroll"><table class="t"><thead><tr><th>Date</th>${it?'':'<th>Item</th>'}<th>What</th><th>Reference</th><th class="r">Qty</th><th class="r">Cost each</th><th></th></tr></thead><tbody>
+      ${list.map(m=>{ const [t,cl]=TYPE[m.type]||[m.type,''], canDel=m.type!=='used', k='delmv'+(m.billId||m.id);
+        return `<tr><td class="nowrap">${fd(m.date)}</td>${it?'':`<td>${esc(m.name||item(m.itemId)?.name||'')}</td>`}<td><span class="pill ${cl}">${t}</span></td>
+        <td class="small">${esc([m.ref, m.memo].filter(Boolean).join(' · '))}${m.jobId?` <button class="linkbtn" data-act="gotoJob" data-id="${m.jobId}">Open job</button>`:''}</td>
+        <td class="r ${m.qty<0?'neg':''}">${m.qty>0?'+':''}${qtyTxt(m.qty)}</td><td class="r">${money(m.cost||0)}</td>
+        <td class="r">${canDel?`<button class="btn sm danger ${UI.confirm===k?'armed':''}" data-act="invDelMove" data-id="${m.id}">${UI.confirm===k?(m.billId?'Tap again: undo the whole bill':'Tap again to undo'):'Undo'}</button>`:''}</td></tr>`; }).join('')}
+    </tbody></table></div>`:`<div class="empty"><p>No stock movements yet.</p></div>`}
+    <p class="small muted card-b">Items used on an invoice go back into stock when you delete that invoice.</p></div>`;
+}
+
+/* ---------- saving ---------- */
+export const inventoryForms = {
+  invItem(f, dd){ const id=f.dataset.id, at=nowISO();
+    const base={name:dd.name, code:dd.code||'', category:dd.category, unit:dd.unit, reorder:+dd.reorder||0, price:r2(dd.price), updatedAt:at};
+    if(S.items.some(x=>x.id!==id && String(x.name).trim().toLowerCase()===dd.name.toLowerCase())) return toast('There is already an item with this name.');
+    if(id) return run(async()=>{ await F.updateDoc(d('items',id), {...base, active:dd.active!=='0'}); closeForm(); }, 'Item saved');
+    const oq=+dd.openQty||0, oc=r2(dd.openCost), nid=newId('items');
+    run(async()=>{ const b=F.writeBatch(db);
+      b.set(d('items',nid), {...base, qty:oq, cost:oq>0?oc:0, lastCost:oc, active:true, createdAt:at});
+      if(oq>0){ const mid=newId('stock'), v=r2(oq*oc);
+        b.set(d('stock',mid), {itemId:nid, name:dd.name, type:'opening', qty:oq, cost:oc, date:today(), ref:'Opening', memo:'Already in stock', at, by:myName()});
+        if(v>0) b.set(d('ledger','stk-'+mid), {date:today(), at, ref:'STOCK-OPEN', memo:`Opening stock: ${dd.name}`, lines:[{acct:'1200',dr:v},{acct:'3000',cr:v}]}); }
+      await b.commit();
+      if(UI.inv?.back==='buy'){ const B=buyState(), empty=B.lines.find(l=>!l.itemId); if(empty){ empty.itemId=nid; empty.cost=oc; } else B.lines.push({itemId:nid, qty:1, cost:oc}); UI.inv={mode:'buy'}; render(); }
+      else closeForm(); }, 'Item added');
+  }
 };
-const METHODS = {
-  bml:{n:'BML bank transfer', acct:'1010', transfer:true},
-  mib:{n:'MIB bank transfer', acct:'1020', transfer:true},
-  cash:{n:'Cash', acct:'1000'},
-  card:{n:'Card on site', acct:'1030'}
-};
-const WINDOWS = {morning:'Morning, 8am to 12pm', afternoon:'Afternoon, 12pm to 4pm', evening:'Evening, 4pm to 8pm'};
-const AC_TYPES = ['Split wall unit','Cassette unit','Window unit','Ducted / central','Portable'];
-const BTUS = ['9,000 BTU','12,000 BTU','18,000 BTU','24,000 BTU','30,000+ BTU','Not sure'];
-const ST = {requested:['New request','coral'],scheduled:['Scheduled','lagoon'],quoted:['Quote sent','orchid'],declined:['Quote declined','coral'],
-  approved:['Quote approved','orchid'],offered:['Open to technicians','orchid'],awaiting:['Waiting for technician','mango'],assigned:['Technician assigned','lagoon'],enroute:['On the way','live'],onsite:['On site','live'],
-  completed:['Work finished','mango'],invoiced:['Invoice sent','mango'],paid:['Paid','teal'],cancelled:['Cancelled','mute']};
-const STEPS = ['Requested','Scheduled','Quoted','Assigned','On the way','Finished','Paid'];
-const SVC_ICONS = [
-  '<path d="M3 6h18v8H3z"/><path d="M6 11h12M7 18c1 1 1 2 0 3M12 18c1 1 1 2 0 3M17 18c1 1 1 2 0 3"/>',
-  '<path d="M12 3v10"/><circle cx="12" cy="16" r="5"/><path d="M12 14v2"/>',
-  '<path d="M14 6l4 4-8 8H6v-4z"/><path d="M13 7l4 4"/>',
-  '<path d="M12 2c3 4 6 7 6 11a6 6 0 0 1-12 0c0-4 3-7 6-11z"/>',
-  '<path d="M4 20h16M6 20V9l6-5 6 5v11"/><path d="M10 20v-6h4v6"/>'
-];
-/* ---------- state ---------- */
-const S = {company:null, portal:null, services:[], techs:[], customers:[], users:[], jobs:[], ledger:[], inbox:[], chats:[], chat:{}, msgs:{}, loaded:{}, need:[], pub:{}};
-const ME = {user:null, profile:null, profileLoaded:false, role:null};
-let OWNER_EXISTS = null;
-let UI = loadUI();
-function loadUI(){ let u={}; try{ u=JSON.parse(localStorage.getItem(`acsp-ui-${CO}-${PORTAL}`)||'{}'); }catch(e){}
-  return Object.assign({ptab:'jobs',ctab:'home',filter:'action',period:'month'}, u,
-    {q:'',sel:'',ed:{},confirm:'',busy:'',pick:{},authMode:PORTAL==='customer'?'welcome':'signin',creating:false,payM:{},rcpt:{},bell:false,modal:null,bk:null}); }
-function saveUI(){ try{ const {ptab,ctab,filter,period}=UI; localStorage.setItem(`acsp-ui-${CO}-${PORTAL}`,JSON.stringify({ptab,ctab,filter,period})); }catch(e){} }
-// Settings the admin controls for the customer and technician portals.
-const PCFG = () => {
-  const p = S.portal || {};
-  return {customerSignup:true, customerCancel:true, showTechPhone:true, techSeePrices:true, leadDays:0, customerNotice:'', techNotice:'', ...p,
-    windows:{morning:true, afternoon:true, evening:true, ...(p.windows||{})}};
-};
-/* ---------- company brand: logo and colours ----------
-   Stored in company/brand (readable before sign-in) and applied to all three portals:
-   header, buttons, links, sign-in page, quotations and invoices, browser tab icon and home-screen icon.
-   The last brand seen is cached on the device so the portal opens in the right colours straight away. */
-const BRAND_PRESETS = [
-  ['Lagoon','#0077B6','#00A08E'], ['Navy','#0B2545','#13579B'], ['Emerald','#047857','#10B981'], ['Crimson','#B91C1C','#F97316'],
-  ['Sunset','#C2410C','#F59E0B'], ['Violet','#5B21B6','#A855F7'], ['Charcoal','#1F2937','#4B5563'], ['Ocean','#0E7490','#22D3EE']
-];
-const hx = h => { h=String(h||'#000').replace('#',''); if(h.length===3) h=h.split('').map(x=>x+x).join(''); const n=parseInt(h,16)||0; return [n>>16&255, n>>8&255, n&255]; };
-const toHex = a => '#'+a.map(v=>Math.round(Math.max(0,Math.min(255,v))).toString(16).padStart(2,'0')).join('');
-const mix = (a,b,t) => { const x=hx(a), y=hx(b); return toHex(x.map((v,i)=>v+(y[i]-v)*t)); };
-const lum = h => { const c=hx(h).map(v=>{ v/=255; return v<=.03928 ? v/12.92 : ((v+.055)/1.055)**2.4; }); return .2126*c[0]+.7152*c[1]+.0722*c[2]; };
-const contrast = (a,b) => { const x=lum(a), y=lum(b); return (Math.max(x,y)+.05)/(Math.min(x,y)+.05); };
-// Nudge a colour towards black or white until it is readable against a background.
-function readable(c, towards, bg, ratio){ let x=c; for(let i=0;i<24 && contrast(x,bg)<ratio;i++) x=mix(x,towards,.1); return x; }
-function brandPalette(b){
-  const A=/^#[0-9a-f]{6}$/i.test(b?.color||'')? b.color : '#0077B6', B=/^#[0-9a-f]{6}$/i.test(b?.color2||'')? b.color2 : A;
-  const main=readable(A,'#000000','#FFFFFF',4.5), heroA=readable(A,'#000000','#FFFFFF',3.2), heroB=readable(B,'#000000','#FFFFFF',3.2);
-  const dmain=readable(A,'#FFFFFF','#0F2231',4.5);
-  return {
-    light:{'--hero-a':heroA,'--hero-b':heroB,'--lagoon':main,'--lagoon-ink':contrast(main,'#FFFFFF')>=4.5?'#FFFFFF':'#0C2233','--lagoon-soft':mix(main,'#FFFFFF',.88)},
-    dark:{'--hero-a':mix(heroA,'#000000',.35),'--hero-b':mix(heroB,'#000000',.35),'--lagoon':dmain,'--lagoon-ink':contrast(dmain,'#04202F')>=4.5?'#04202F':'#FFFFFF','--lagoon-soft':mix(dmain,'#0F2231',.8)},
-    theme:heroA
-  };
-}
-let BRAND = (()=>{ try{ return JSON.parse(localStorage.getItem('acsp-brand-'+CO)||'null'); }catch(e){ return null; } })();
-function applyBrand(b){
-  BRAND=b||null;
-  try{ b? localStorage.setItem('acsp-brand-'+CO, JSON.stringify(b)) : localStorage.removeItem('acsp-brand-'+CO); }catch(e){}
-  let st=document.getElementById('brand-vars');
-  if(!b || !b.color){ st?.remove(); document.body.removeAttribute('data-brand'); try{ localStorage.removeItem('acsp-brandcss-'+CO); }catch(e){} updateIcons(); return; }
-  const p=brandPalette(b), decl=o=>Object.entries(o).map(([k,v])=>`${k}:${v}`).join(';');
-  if(!st){ st=document.createElement('style'); st.id='brand-vars'; document.head.appendChild(st); }
-  st.textContent=`body[data-portal][data-brand]{${decl(p.light)}}
-@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) body[data-portal][data-brand]{${decl(p.dark)}} }
-:root[data-theme="dark"] body[data-portal][data-brand]{${decl(p.dark)}}`;
-  document.body.setAttribute('data-brand','');
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', p.theme);
-  try{ localStorage.setItem('acsp-brandcss-'+CO, st.textContent); }catch(e){}
-  try{ window.AndroidApp?.setStatusBarColor?.(p.theme); }catch(e){}
-  updateIcons();
-}
-// The default mark, in the brand colours, for companies without a logo.
-function defaultMarkSvg(bg1, bg2){
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${bg1}"/><stop offset="1" stop-color="${bg2}"/></linearGradient></defs><rect width="64" height="64" fill="url(#g)"/><rect x="10" y="14" width="44" height="20" rx="6" fill="#fff"/><line x1="17" y1="27" x2="47" y2="27" stroke="${bg1}" stroke-width="3" stroke-linecap="round"/><path d="M20 40c3 3 3 6 0 9M32 40c3 3 3 6 0 9M44 40c3 3 3 6 0 9" stroke="#FFD166" stroke-width="3.5" fill="none" stroke-linecap="round"/></svg>`;
-}
-function loadImg(src){ return new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=()=>rej(new Error("That image can't be read. Try a PNG or JPG.")); i.src=src; }); }
-async function makeIcon(size){
-  const b=BRAND, cv=document.createElement('canvas'); cv.width=cv.height=size; const g=cv.getContext('2d');
-  if(b?.logo){
-    g.fillStyle = b.iconBg==='brand' ? brandPalette(b).theme : '#FFFFFF'; g.fillRect(0,0,size,size);
-    const im=await loadImg(b.logo), pad=size*.14, box=size-pad*2, k=Math.min(box/im.width, box/im.height);
-    g.drawImage(im, (size-im.width*k)/2, (size-im.height*k)/2, im.width*k, im.height*k);
-  } else {
-    const p=b?.color? brandPalette(b) : {light:{'--hero-a':'#0077B6','--hero-b':'#00A08E'}};
-    const im=await loadImg('data:image/svg+xml;charset=utf-8,'+encodeURIComponent(defaultMarkSvg(p.light['--hero-a'], p.light['--hero-b'])));
-    g.drawImage(im,0,0,size,size);
-  }
-  return cv.toDataURL('image/png');
-}
-let iconsT;
-function updateIcons(){
-  clearTimeout(iconsT);
-  iconsT=setTimeout(async()=>{
-    if(!BRAND?.logo && !BRAND?.color) return;   // keep the files in /assets
-    try{
-      const i192=await makeIcon(192), i512=await makeIcon(512);
-      const setLink=(rel, href, extra={})=>{ let l=document.querySelector(`link[rel="${rel}"]`); if(!l){ l=document.createElement('link'); l.rel=rel; document.head.appendChild(l); } l.href=href; Object.entries(extra).forEach(([k,v])=>l.setAttribute(k,v)); };
-      setLink('icon', i192, {type:'image/png'}); setLink('apple-touch-icon', i192);
-      // Home-screen app: name, colours and icon of this company.
-      const nm=S.company?.name || 'AC Service';
-      const man={name:`${nm} · ${PORTAL_NAME[PORTAL]}`, short_name:nm.length>14? nm.slice(0,14) : nm, start_url:new URL(portalHref(PORTAL),location.href).href, scope:new URL(PATH_MODE?`/${CO}/`:'/',location.href).href, id:`${CO}-${PORTAL}`,
-        display:'standalone', background_color:'#FFFFFF', theme_color:BRAND.color? brandPalette(BRAND).theme : '#0077B6',
-        icons:[{src:i192,sizes:'192x192',type:'image/png'},{src:i512,sizes:'512x512',type:'image/png'},{src:i512,sizes:'512x512',type:'image/png',purpose:'maskable'}]};
-      // The install file stays the real one (manifest-*.webmanifest): each portal installs as its own app with
-      // its own scope (/customer, /tech, /admin). A generated one confused phones into opening the wrong portal.
-    }catch(e){ console.warn('brand icons', e); }
-  }, 60);
-}
-// Logos are resized to fit 320×320 and kept small enough to store with the company details.
-async function readLogo(file){
-  if(!/^image\//.test(file.type)) throw new Error('Upload a PNG, JPG, SVG or WebP image of your logo.');
-  const url=URL.createObjectURL(file);
-  try{
-    const im=await loadImg(url), max=320, k=Math.min(1, max/Math.max(im.width||max, im.height||max));
-    const cv=document.createElement('canvas'); cv.width=Math.max(1,Math.round((im.width||max)*k)); cv.height=Math.max(1,Math.round((im.height||max)*k));
-    cv.getContext('2d').drawImage(im,0,0,cv.width,cv.height);
-    let out=cv.toDataURL('image/png');
-    if(out.length>350000) out=cv.toDataURL('image/webp',.9);
-    if(out.length>350000) throw new Error('That logo is too detailed to store. Try a simpler or smaller image.');
-    return out;
-  } finally { URL.revokeObjectURL(url); }
-}
-function setTitle(){
-  const n=(S.inbox||[]).filter(x=>!x.read).length;
-  document.title=(n?`(${n}) `:'')+(S.company?.name ? `${S.company.name} · ${PORTAL_NAME[PORTAL]}` : document.title.replace(/^\(\d+\) /,''));
-}
-if(BRAND) applyBrand(BRAND);
+function closeForm(){ UI.inv=null; UI.buy=null; UI.adj=null; UI.confirm=''; render(); }
 
-/* ---------- helpers ---------- */
-const $ = s => document.querySelector(s);
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const r2 = n => Math.round((+n||0)*100)/100;
-const money = n => CUR + ' ' + (+n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-const nowISO = () => new Date().toISOString();
-const today = () => new Date().toLocaleDateString('en-CA',{timeZone:TZ});
-const pad = (n,w=4) => String(n).padStart(w,'0');
-function addDays(d,n){ const x=new Date(d+'T12:00:00Z'); x.setUTCDate(x.getUTCDate()+n); return x.toISOString().slice(0,10); }
-function fd(d){ if(!d) return ''; const plain=d.length===10; return new Date(plain? d+'T12:00:00Z' : d).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone: plain?'UTC':TZ}); }
-function ft(iso){ return new Date(iso).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:TZ}); }
-function fdt(iso){ return iso ? fd(iso)+', '+ft(iso) : ''; }
-function t12(hm){ if(!hm) return ''; let [h,m]=hm.split(':').map(Number); const ap=h>=12?'pm':'am'; h=h%12||12; return h+':'+String(m).padStart(2,'0')+' '+ap; }
-const slotText = s => s ? fd(s.date)+' at '+t12(s.time) : '';
-const initials = n => String(n||'?').split(/\s+/).filter(Boolean).slice(0,2).map(w=>w[0].toUpperCase()).join('');
-function setPath(o,path,v){ const k=path.split('.'); let x=o; for(let i=0;i<k.length-1;i++){ x = x[k[i]] ??= {}; } x[k[k.length-1]]=v; }
-const clone = x => JSON.parse(JSON.stringify(x));
-function ago(iso){ const s=Math.max(0,Math.round((Date.now()-new Date(iso))/1000)); return s<60? s+' s ago' : s<3600? Math.round(s/60)+' min ago' : fdt(iso); }
-function haversineKm(a,b){ const R=6371, toR=x=>x*Math.PI/180; const dLat=toR(b.lat-a.lat), dLng=toR(b.lng-a.lng);
-  const h=Math.sin(dLat/2)**2+Math.cos(toR(a.lat))*Math.cos(toR(b.lat))*Math.sin(dLng/2)**2; return 2*R*Math.asin(Math.sqrt(h)); }
-
-const co = () => Object.assign({name:'Your AC company', tagline:'Air-conditioning service', gstRate:8, terms:7, phone:'', email:'', address:'', reg:'', tin:'', bml:'', mib:'', methods:{cash:true,bml:true,mib:true,card:true}}, S.company||{});
-const sv = id => S.services.find(x=>x.id===id);
-const cust = id => S.customers.find(x=>x.id===id);
-// "H. Bluewave, Malé", or just "Malé" when there's no address (no stray comma).
-const addrLine = x => [x?.address, x?.island].map(v=>String(v||'').trim()).filter(Boolean).join(', ');
-// The customer's GST TIN for quotations and invoices: from their record, or saved on the document.
-const custTin = j => cust(j.customerId)?.tin || j.invoice?.customerTin || j.quote?.customerTin || '';
-const tech = id => S.techs.find(x=>x.id===id);
-const job = id => S.jobs.find(x=>x.id===id) || (S.openJobs||[]).find(x=>x.id===id);
-// A job sent to one technician waits for them to accept it. Older jobs without assignStatus count as accepted.
-const accepted = j => !!j.techId && (j.assignStatus||'accepted')==='accepted';
-const jobTitle = j => (j.serviceIds||[]).map(id=>sv(id)?.name).filter(Boolean).join(', ') || docTitle(j) || (j.issue ? 'AC check-up' : 'AC service');
-// Quotations and invoices made directly by the office are named after their first line.
-function docTitle(j){ const D=j.direct && (j.invoice||j.quote); if(!D?.lines?.length) return ''; return D.lines[0].desc + (D.lines.length>1?` +${D.lines.length-1} more`:''); }
-
-/* ---------- problems → services ----------
-   Customers can say what's wrong instead of picking a service. Each service can list the problems it fixes
-   (office: Company & services). Without that, the service name and description are matched against keywords. */
-const ISSUES = ['Not cooling','Water leaking','Strange noise','Bad smell','Not turning on','Ice on the unit','Remote not working','Regular service'];
-const ISSUE_WORDS = {
-  'Not cooling':        ['gas','refill','top-up','top up','recharge','general','service','clean','check','repair','diagnos'],
-  'Water leaking':      ['drain','leak','general','service','clean','check'],
-  'Strange noise':      ['repair','noise','fan','motor','check','diagnos','inspect','service'],
-  'Bad smell':          ['chemical','deep','wash','clean','general','service'],
-  'Not turning on':     ['repair','electric','pcb','check','diagnos','inspect','troubleshoot'],
-  'Ice on the unit':    ['gas','refill','top-up','top up','general','clean','service','check'],
-  'Remote not working': ['remote','repair','check','inspect'],
-  'Regular service':    ['general','maintenance','service','clean','routine']
-};
-/** Best-matching services for the chosen problems, best first (at most 2). */
-function recommendServices(issues){
-  if(!issues?.length || !S.services?.length) return [];
-  const tagged=S.services.filter(s=>(s.fixes||[]).length);
-  const score=new Map();
-  for(const s of S.services){
-    let n=0;
-    if(tagged.length){ n=(s.fixes||[]).filter(x=>issues.includes(x)).length*10; }
-    else {
-      const text=`${s.name} ${s.desc||''}`.toLowerCase();
-      for(const i of issues) (ISSUE_WORDS[i]||[]).forEach((w,k)=>{ if(text.includes(w)) n+=ISSUE_WORDS[i].length-k; });
-    }
-    if(n>0) score.set(s.id,n);
-  }
-  return [...score.entries()].sort((a,b)=>b[1]-a[1]).slice(0,2).map(([id])=>id);
-}
-const myCustomer = () => S.customers.find(x=>x.id===ME.user?.uid);
-
-function stage(j){
-  if(j.cancelled) return 'cancelled';
-  if(j.payment?.status==='paid') return 'paid';
-  if(j.invoice) return 'invoiced';
-  if(j.finishedAt) return 'completed';
-  if(j.arrivedAt) return 'onsite';
-  if(j.departedAt) return 'enroute';
-  if(j.techId && !accepted(j)) return 'awaiting';
-  if(j.techId) return 'assigned';
-  if(j.open) return 'offered';
-  if(j.quote?.status==='accepted') return 'approved';
-  if(j.quote?.status==='declined') return 'declined';
-  if(j.quote) return 'quoted';
-  if(j.slot) return 'scheduled';
-  return 'requested';
-}
-const overdue = j => j.invoice && j.payment?.status!=='paid' && j.invoice.dueDate < today();
-function pill(j){
-  const s=stage(j); let [l,t]=ST[s];
-  if(s==='invoiced' && j.payment?.status==='pending'){ l=METHODS[j.payment.method]?.n+' due'; t='coral'; }
-  else if(s==='invoiced' && overdue(j)){ l='Overdue'; t='bad'; }
-  else if(s==='paid' && j.payment?.verified===false && ME.role==='provider'){ l='Paid · verify'; t='mango'; }
-  else if(s==='awaiting' && ME.role==='technician'){ l='New: accept or decline'; t='coral'; }
-  return `<span class="pill ${t}">${esc(l)}</span>`;
-}
-function hint(j){
-  const s=stage(j);
-  if(!j.cancelled && !j.techId && !j.open && j.assignStatus==='declined' && !j.departedAt) return 'Technician declined: assign again';
-  if(s==='requested') return 'Confirm a time';
-  if(s==='declined') return 'Revise the quotation';
-  if(s==='scheduled') return 'Send a quote or assign';
-  if(s==='approved') return j.direct ? 'Create the invoice' : 'Assign a technician';
-  if(s==='completed') return 'Send the invoice';
-  if(s==='invoiced' && j.payment?.status==='pending') return 'Confirm payment received';
-  if(s==='paid' && j.payment?.verified===false) return 'Verify bank transfer';
-  return '';
-}
-function totals(d){
-  const sub=(d.lines||[]).reduce((a,l)=>a+(+l.qty||0)*(+l.rate||0),0);
-  const disc=Math.min(+d.discount||0, sub), net=r2(sub-disc), rate=d.gstRate ?? co().gstRate, gst=r2(net*rate/100);
-  return {sub:r2(sub), disc:r2(disc), net, rate, gst, total:r2(net+gst)};
-}
-function avgRating(techId){ const r=S.jobs.filter(j=>j.techId===techId && j.rating).map(j=>j.rating.stars); return r.length? {avg:r.reduce((a,b)=>a+b,0)/r.length, n:r.length} : null; }
-function stars(n){ n=Math.round(n); return `<span class="stars" aria-label="${n} out of 5 stars">${'★'.repeat(n)}<span class="off">${'★'.repeat(5-n)}</span></span>`; }
-function balances(entries){ const b={}; for(const e of entries) for(const l of (e.lines||[])) b[l.acct]=r2((b[l.acct]||0)+(+l.dr||0)-(+l.cr||0)); return b; }
-function sideBal(acct,b){ const t=ACCTS[acct]?.t, v=b[acct]||0; return (t==='asset'||t==='expense')? v : -v; }
-
-/* ---------- toast & errors ---------- */
-let toastT;
-function toast(t){ const el=$('#toast'); el.textContent=t; el.hidden=false; clearTimeout(toastT); toastT=setTimeout(()=>el.hidden=true, 3600); }
-function errMsg(e){
-  const c=String(e?.code||'').replace(/^(auth|firestore)\//,'');
-  const M={
-    'permission-denied':"You don't have permission to do that.",
-    'unavailable':"You're offline. Check your connection and try again.",
-    'invalid-credential':'Email or password is incorrect.', 'wrong-password':'Email or password is incorrect.', 'user-not-found':'No account uses that email. Create one instead.',
-    'email-already-in-use':'An account already uses that email. Sign in instead.', 'weak-password':'Use a password with at least 6 characters.',
-    'invalid-email':'That email address is not valid.', 'popup-closed-by-user':'Google sign-in was closed before finishing.',
-    'too-many-requests':'Too many attempts. Wait a few minutes and try again.',
-    'operation-not-allowed':"Requests without an account aren't switched on yet. Please create an account, or call us.",
-    'admin-restricted-operation':"Requests without an account aren't switched on yet. Please create an account, or call us.",
-    'credential-already-in-use':'An account already uses that email. Sign in with it instead.', 'provider-already-linked':'This account already has a login.',
-    'requires-recent-login':'Please sign in again, then try once more.', 'unauthorized-domain':'This website is not allowed to sign in yet. Add its domain in Firebase → Authentication → Settings → Authorized domains.'
-  };
-  return M[c] || e?.message || 'Something went wrong. Try again.';
-}
-async function run(fn, okText){ try{ await fn(); if(okText) toast(okText); return true; }catch(e){ console.error(e); toast(errMsg(e)); return false; } }
-/* ---------- firestore refs ---------- */
-// Every read and write goes to this company's own space in the database.
-const d = (...p) => F.doc(db, 'tenants', CO, ...p);
-const c = (...p) => F.collection(db, 'tenants', CO, ...p);
-const tenantRef = () => F.doc(db, 'tenants', CO);
-const snapList = s => s.docs.map(x=>({...x.data(), id:x.id}));
-function sys(text){ return {kind:'sys', text, at:nowISO(), uid:ME.user.uid, role:ME.role, name:myName()}; }
-function msgObj(text){ return {kind:'msg', text, at:nowISO(), uid:ME.user.uid, role:ME.role, name:myName()}; }
-function myName(){ return ME.role==='provider' ? co().name : (ME.profile?.name || ME.user?.displayName || 'User'); }
-function log(jobId, text){ return F.addDoc(c('jobs',jobId,'messages'), sys(text)).catch(e=>console.warn('activity log', e)); }
-
-/* ---------- notifications ----------
-   Every step writes a notification to each other party's inbox: inbox/office/items for the office,
-   inbox/{uid}/items for a customer or technician. Each portal shows them under the bell, as phone/desktop
-   alerts while a portal is open, and (with the optional Cloud Function) as push messages when it's closed. */
-const STALE_H = 4;   // location sharing stops on its own if a trip runs longer than this
-const staleTrip = j => !!(j.departedAt && !j.arrivedAt && Date.now()-new Date(j.departedAt).getTime() > STALE_H*3600e3);
-const inboxId = () => ME.role==='provider' ? 'office' : ME.user.uid;
-const portalOfRecipient = (j, rid) => rid==='office' ? 'admin' : rid===j.techId ? 'technician' : 'customer';
-function recipients(j, parties){
-  const out=new Set();
-  for(const p of parties){
-    if(p==='office') out.add('office');
-    else if(p==='customer' && j.customerId && cust(j.customerId)?.hasLogin!==false) out.add(j.customerId);
-    else if(p==='tech' && j.techId) out.add(j.techId);
-  }
-  if(ME.role==='provider') out.delete('office');
-  out.delete(ME.user?.uid);
-  return [...out];
-}
-async function notify(j, parties, title, body){
-  const to=recipients(j, parties); if(!to.length) return;
-  try{
-    const b=F.writeBatch(db);
-    for(const rid of to) b.set(F.doc(c('inbox',rid,'items')), {title, body, jobId:j.id, jobNo:j.no||'', at:nowISO(), read:false, from:ME.user.uid, fromName:myName(), portal:portalOfRecipient(j,rid)});
-    await b.commit();
-  }catch(e){ console.warn('notify', e); }
-}
-async function notifyTo(j, rids, title, body){
-  rids=rids.filter(r=>r && r!==ME.user?.uid); if(!rids.length) return;
-  try{ for(let i=0;i<rids.length;i+=400){ const b=F.writeBatch(db);
-      for(const rid of rids.slice(i,i+400)) b.set(F.doc(c('inbox',rid,'items')), {title, body, jobId:j.id, jobNo:j.no||'', at:nowISO(), read:false, from:ME.user.uid, fromName:myName(), portal:'technician'});
-      await b.commit(); } }catch(e){ console.warn('notify', e); }
-}
-/** Record a step in the job's activity log and notify the other parties. */
-async function event(j, text, parties, title){ await log(j.id, text); await notify(j, parties, title, `${j.no?j.no+' · ':''}${text}`); }
-const unread = () => (S.inbox||[]).filter(x=>!x.read).length;
-function itemUrl(it){ return new URL(portalHref(it.portal||PORTAL, it.chat ? {chat:it.chat} : it.jobId ? {job:it.jobId} : {}), location.href).href; }
-function pushState(){
-  if(window.AndroidApp?.notificationsEnabled) return window.AndroidApp.notificationsEnabled() ? 'granted' : 'default';
-  if(!('Notification' in window)) return /iPhone|iPad|iPod/.test(navigator.userAgent) ? 'ios' : 'none'; return Notification.permission; }
-async function alertItem(it){
-  // A chat message for the conversation already on screen needs no alert.
-  if(it.chat && openChatId()===it.chat && !document.hidden){ F.updateDoc(d('inbox',inboxId(),'items',it.id),{read:true}).catch(()=>{}); return; }
-  if(!document.hidden){ toast(`${it.title}: ${it.body}`); return; }
-  if(IN_APP) return;   // the Android app shows its own phone notifications
-  if(pushState()!=='granted') return;
-  const opts={body:it.body, tag:it.id, icon:'/assets/icon-192.png', badge:'/assets/icon-192.png', data:{url:itemUrl(it)}};
-  try{ const reg=SW_REG || await navigator.serviceWorker?.getRegistration(); if(reg){ await reg.showNotification(it.title, opts); return; } }catch(e){}
-  try{ const n=new Notification(it.title, opts); n.onclick=()=>{ window.focus(); it.chat ? openChat(it.chat) : openJobById(it.jobId); render(); }; }catch(e){}
-}
-
-/* ---------- office ↔ technician chat ----------
-   One private conversation per technician: chats/{techId}/messages. Customers never see it.
-   chats/{techId} keeps the last message and when each side last read it, for unread markers. */
-let chatSub={id:null, un:null};
-const MARKED=new Set();
-function openChatId(){
-  if(!ME.role) return null;
-  if(PORTAL==='admin') return UI.ptab==='chat' && UI.chatTech ? UI.chatTech : null;
-  if(PORTAL==='technician') return UI.tview==='chat' ? ME.user.uid : null;
-  return null;
-}
-function syncChatSub(){
-  const want=openChatId();
-  if(chatSub.id===want) return;
-  if(chatSub.un) chatSub.un(); chatSub={id:want, un:null};
-  if(!want) return;
-  chatSub.un=F.onSnapshot(F.query(c('chats',want,'messages'), F.orderBy('at','desc'), F.limit(200)),
-    s=>{ S.chat[want]=snapList(s).reverse(); schedRender(); }, e=>{ console.warn('chat',e); S.chat[want]=[]; schedRender(); });
-}
-function chatUnread(id){
-  const ch=(S.chats||[]).find(x=>x.id===id); if(!ch || !ch.lastAt) return false;
-  return ME.role==='provider' ? ch.lastRole==='technician' && ch.lastAt > (ch.readOffice||'') : ch.lastRole==='provider' && ch.lastAt > (ch.readTech||'');
-}
-function markChatRead(){
-  const id=openChatId(); if(!id || document.hidden || !chatUnread(id)) return;
-  const ch=S.chats.find(x=>x.id===id), key=id+ch.lastAt; if(MARKED.has(key)) return; MARKED.add(key);
-  F.setDoc(d('chats',id), {[ME.role==='provider'?'readOffice':'readTech']:nowISO()}, {merge:true}).catch(e=>console.warn('chat read',e));
-  const b=F.writeBatch(db); let n=0;
-  (S.inbox||[]).filter(x=>x.chat===id && !x.read).forEach(x=>{ b.update(d('inbox',inboxId(),'items',x.id),{read:true}); n++; });
-  if(n) b.commit().catch(()=>{});
-}
-function openChat(id, jobId){
-  if(PORTAL==='admin'){ UI.ptab='chat'; UI.chatTech=id; UI.sel=''; UI.newJob=null; }
-  else UI.tview='chat';
-  UI.chatJob=jobId||''; UI.bell=false;
-  if(innerWidth<=900) scrollTo(0,0);
-}
-function chatThread(id){
-  const msgs=S.chat[id], t=tech(id), C=co(), me=ME.user.uid;
-  const jobs=S.jobs.filter(j=>j.techId===id && !j.cancelled && j.payment?.status!=='paid');
-  const other = ME.role==='provider' ? (t?.name||'Technician') : C.name+' office';
-  let lastDay='', body='';
-  for(const m of (msgs||[])){
-    const day=fd(m.at); if(day!==lastDay){ body+=`<div class="sys">${day===fd(nowISO())?'Today':esc(day)}</div>`; lastDay=day; }
-    body+=`<div class="msg r-${esc(m.role)} ${m.uid===me?'mine':''}"><span class="who">${esc(m.name)}${m.role==='provider'?' · Office':''} · ${ft(m.at)}</span>
-      ${m.jobId?`<button class="job-chip" data-act="chatOpenJob" data-id="${esc(m.jobId)}">${esc(m.jobNo||'Job')}</button>`:''}<p>${esc(m.text)}</p></div>`;
-  }
-  return `<div class="chat">
-    <div class="chat-h"><button class="btn sm back-chat" data-act="closeChat">← Back</button><span class="avatar">${initials(other)}</span>
-      <div style="min-width:0"><b>${esc(other)}</b><span class="small muted">${ME.role==='provider'?esc(t?.phone||''):'Private chat with the office. Customers don\'t see it.'}</span></div></div>
-    <div class="thread chat-thread" data-keep-scroll="chat-${id}">${msgs===undefined?'<div class="loading">Loading messages…</div>':msgs.length?body:`<div class="empty small"><p>No messages yet. Say hello, or ask about a job.</p></div>`}</div>
-    <div class="chat-compose">
-      ${jobs.length?`<select id="chat-job" data-np aria-label="About which job" class="chat-job"><option value="">Not about a specific job</option>${jobs.map(j=>`<option value="${j.id}" ${UI.chatJob===j.id?'selected':''}>About ${esc(j.no)} · ${esc(jobTitle(j))}${ME.role==='technician'?'':' · '+esc(j.customerName||'')}</option>`).join('')}</select>`:''}
-      <div class="row" style="flex-wrap:nowrap;align-items:flex-end"><label class="field" style="flex:1"><span class="sr">Message</span><textarea id="chat-text" rows="2" placeholder="Write a message"></textarea></label>
-      <button class="btn primary" data-act="chatSend">Send</button></div></div></div>`;
-}
-let SW_REG=null, PUSH_TOKEN=null, pushTried=null;
-async function registerSW(){
-  if(!('serviceWorker' in navigator) || !CONFIGURED) return null;
-  const q = SETTINGS.vapidKey ? '?'+new URLSearchParams({apiKey:firebaseConfig.apiKey, projectId:firebaseConfig.projectId, messagingSenderId:firebaseConfig.messagingSenderId||'', appId:firebaseConfig.appId||''}) : '';
-  try{ SW_REG = await navigator.serviceWorker.register('/sw.js'+q, {scope:'/'}); }catch(e){ console.warn('service worker', e); }
-  return SW_REG;
-}
-// Push while every portal is closed needs a VAPID key in firebase-config.js and the Cloud Function in /functions.
-// In the Android app: the app gets a push token from Firebase and hands it to the page, which saves it
-// on the account so the push function can reach this phone.
-window.__nativePushToken = async token => {
-  if(!token || !ME.user) return;
-  PUSH_TOKEN=token;
-  if(!(ME.profile?.fcmTokens||[]).includes(token)) try{ await F.updateDoc(d('users',ME.user.uid), {fcmTokens:F.arrayUnion(token)}); }catch(e){ console.warn('push token', e); }
-  schedRender();
-};
-async function registerPush(){
-  if(window.AndroidApp?.requestPushToken){ if(ME.user && pushTried!==ME.user.uid){ pushTried=ME.user.uid; try{ window.AndroidApp.requestPushToken(); }catch(e){} } return; }
-  if(!SETTINGS.vapidKey || !ME.user || pushState()!=='granted' || pushTried===ME.user.uid) return;
-  pushTried=ME.user.uid;
-  try{
-    const M=await import(FB+'firebase-messaging.js');
-    if(!(await M.isSupported())) return;
-    const reg=SW_REG || await registerSW(); if(!reg) return;
-    const token=await M.getToken(M.getMessaging(fbApp), {vapidKey:SETTINGS.vapidKey, serviceWorkerRegistration:reg});
-    PUSH_TOKEN=token;
-    if(token && !(ME.profile?.fcmTokens||[]).includes(token)) await F.updateDoc(d('users',ME.user.uid), {fcmTokens:F.arrayUnion(token)});
-  }catch(e){ console.warn('push', e); }
-}
-function openJobById(id){
-  if(!id) return;
-  UI.sel=id; UI.bell=false; UI.modal=null;
-  if(PORTAL==='admin'){ UI.ptab='jobs'; UI.filter='all'; UI.newJob=null; }
-  if(innerWidth<=900) scrollTo(0,0);
-}
-function bellButton(){
-  const n=unread();
-  return `<button class="bell" data-act="bell" aria-label="Notifications${n?', '+n+' unread':''}" aria-expanded="${!!UI.bell}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>${n?`<span class="bell-n">${n>9?'9+':n}</span>`:''}</button>`;
-}
-/* iPhone: notifications only work from the Home Screen app (iOS 16.4 or later), so guide people there. */
-const SHARE_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="Share" style="vertical-align:-3px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><path d="M12 3v12M7 8l5-5 5 5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>`;
-function iosHidden(){ try{ return localStorage.getItem('acsp-ios-hide')===CO; }catch(e){ return false; } }
-function iosBanner(){
-  if(!IS_IOS || IN_APP || iosHidden()) return '';
-  if(!STANDALONE) return `<div class="push-banner ios"><div><b>Get notifications on your iPhone</b>
-      <span>1. Tap ${SHARE_ICON} <b>Share</b> at the bottom of Safari. 2. Tap <b>Add to Home Screen</b>, then <b>Add</b>. 3. Open <b>${esc(brandName())}</b> from your Home Screen, sign in, and tap <b>Turn on notifications</b>.</span></div>
-    <div class="row"><button class="btn sm" data-act="iosHide">Not now</button></div></div>`;
-  if(pushState()==='default' && PORTAL!=='customer') return `<div class="push-banner"><div><b>Turn on notifications</b><span>Get an alert for new jobs, messages and every update, even when the app is closed.</span></div>
-    <div class="row"><button class="btn sm primary" data-act="enablePush">Turn on notifications</button><button class="btn sm" data-act="iosHide">Not now</button></div></div>`;
-  return '';
-}
-function pushPrompt(){
-  const s=pushState();
-  if(s==='granted') return `<p class="bp-note ok">Alerts are on for this device.</p>`;
-  if(s==='denied') return `<p class="bp-note">Alerts are blocked for this site. Allow notifications in your browser's site settings to get them.</p>`;
-  if(s==='ios') return `<p class="bp-note">On iPhone, tap ${SHARE_ICON} Share in Safari, then <b>Add to Home Screen</b>. Open ${esc(brandName())} from your Home Screen and turn on alerts there. Needs iOS 16.4 or later.</p>`;
-  if(s==='none') return '';
-  return `<div class="bp-note"><span>Get an alert on this device for every update, even when the portal is in the background.</span><button class="btn sm primary" data-act="enablePush">Turn on alerts</button></div>`;
-}
-function bellPanel(){
-  if(!UI.bell) return '';
-  const items=S.inbox||[];
-  return `<div class="backdrop clear" data-act="bellClose"></div><section class="bell-panel" role="dialog" aria-label="Notifications">
-    <div class="bp-head"><h3>Notifications</h3>${unread()?'<button class="linkbtn" data-act="readAll">Mark all as read</button>':''}</div>
-    ${pushPrompt()}
-    ${items.length?`<ul class="bp-list">${items.map(it=>`<li><button data-act="openItem" data-id="${it.id}" class="${it.read?'':'unread'}"><b>${esc(it.title)}</b><span>${esc(it.body)}</span><small>${ago(it.at)}${it.fromName?' · '+esc(it.fromName):''}</small></button></li>`).join('')}</ul>`
-      :`<div class="empty small"><p>No notifications yet. Every update about your ${PORTAL==='technician'?'jobs':'requests'} will appear here.</p></div>`}
-  </section>`;
-}
-function modalView(){
-  if(!UI.modal) return '';
-  return `<div class="backdrop" data-act="modalClose"></div><div class="modal${UI.modal.wide?' wide':''}" role="dialog" aria-modal="true" aria-label="${esc(UI.modal.title)}"><div class="modal-h"><h3>${esc(UI.modal.title)}</h3><button class="icon" data-act="modalClose" aria-label="Close">×</button></div><div class="modal-b">${UI.modal.html}</div></div>`;
-}
-
-/* ---------- payment receipts ----------
-   Stored in Firestore (jobs/{id}/files/receipt) so no Cloud Storage bucket or paid plan is needed.
-   Photos are resized to stay well under Firestore's 1 MB document limit. */
-function fileToDataUrl(f){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(new Error('Could not read that file.')); r.readAsDataURL(f); }); }
-async function readReceipt(file){
-  const isPdf = file.type==='application/pdf' || /\.pdf$/i.test(file.name);
-  if(isPdf){
-    if(file.size>700*1024) throw new Error('That PDF is over 700 KB. Upload a screenshot or photo of the receipt instead.');
-    return {dataUrl:await fileToDataUrl(file), name:file.name, type:'application/pdf', size:file.size};
-  }
-  if(!/^image\//.test(file.type)) throw new Error('Upload a photo, screenshot or PDF of the receipt.');
-  const bmp = await createImageBitmap(file).catch(()=>null);
-  if(!bmp) throw new Error("This photo format can't be read here. Take a screenshot of the receipt and upload that.");
-  let max=1600, q=0.82, out='';
-  for(let i=0;i<6;i++){
-    const k=Math.min(1, max/Math.max(bmp.width,bmp.height)), cv=document.createElement('canvas');
-    cv.width=Math.max(1,Math.round(bmp.width*k)); cv.height=Math.max(1,Math.round(bmp.height*k));
-    const g=cv.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,cv.width,cv.height); g.drawImage(bmp,0,0,cv.width,cv.height);
-    out=cv.toDataURL('image/jpeg', q); if(out.length<900000) break; max*=0.8; q=Math.max(0.5,q-0.08);
-  }
-  if(out.length>=900000) throw new Error('That image is too large. Take a screenshot of the receipt and upload that.');
-  return {dataUrl:out, name:file.name.replace(/\.[^.]+$/,'')+'.jpg', type:'image/jpeg', size:Math.round(out.length*0.75)};
-}
-const copyBtn = v => `<button type="button" class="btn sm" data-act="copy" data-v="${esc(v)}">Copy</button>`;
-function receiptPicker(j){
-  const r=UI.rcpt[j.id];
-  if(r) return `<div class="rcpt">${r.type==='application/pdf'?'<span class="rcpt-ic">PDF</span>':`<img src="${esc(r.dataUrl)}" alt="">`}<div style="min-width:0"><b>${esc(r.name)}</b><small>${Math.max(1,Math.round(r.size/1024))} KB · ready to send</small></div><button type="button" class="icon" data-act="rcptRemove" data-id="${j.id}" aria-label="Remove receipt">×</button></div>`;
-  return `<label class="upload"><input type="file" id="rfile-${j.id}" data-np accept="image/*,application/pdf" data-change="receiptFile" data-id="${j.id}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></svg><span><b>Upload payment receipt</b><small>Photo, screenshot or PDF</small></span></label>`;
-}
-function receiptLine(j){
-  const R=j.receipt; if(!R || !['provider','customer'].includes(ME.role)) return '';
-  return `<div class="row small rcpt-line"><span class="pill teal">Receipt uploaded</span><span class="muted">${fdt(R.at)}</span><button class="btn sm" data-act="viewReceipt" data-id="${j.id}">View receipt</button></div>`;
-}
-async function nextNumber(name){
-  return F.runTransaction(db, async tx=>{ const ref=d('counters',name); const s=await tx.get(ref); const n=(s.exists()? s.data().n : 0)+1; tx.set(ref,{n}); return n; });
-}
-/* ---------- subscriptions ---------- */
-let unsubs=[], subRole=null, msgSub={id:null, un:null};
-function stopSubs(){ unsubs.forEach(u=>{ try{u();}catch(e){} }); unsubs=[]; subRole=null; if(msgSub.un) msgSub.un(); msgSub={id:null,un:null};
-  if(chatSub.un) chatSub.un(); chatSub={id:null,un:null};
-  Object.assign(S,{services:[],techs:[],customers:[],users:[],jobs:[],openJobs:[],ledger:[],inbox:[],chats:[],chat:{},msgs:{},loaded:{},need:[]}); }
-function subCol(key, q, map=snapList){ S.need.push(key); unsubs.push(F.onSnapshot(q, s=>{ S[key]=map(s); S.loaded[key]=true; schedRender(); }, e=>{ console.error(key,e); S.loaded[key]=true; toast(errMsg(e)); schedRender(); })); }
-function startSubs(){
-  const role=ME.role, uid=ME.user.uid;
-  if(subRole===role) return; stopSubs(); subRole=role;
-  subCol('services', c('services'));
-  subCol('techs', c('techs'));
-  if(role==='provider'){ subCol('customers', c('customers')); subCol('jobs', c('jobs')); subCol('ledger', c('ledger')); subCol('users', c('users')); subCol('chats', c('chats')); }
-  else if(role==='customer'){
-    S.need.push('customers'); unsubs.push(F.onSnapshot(d('customers',uid), s=>{ S.customers = s.exists()? [{...s.data(), id:s.id}] : []; S.loaded.customers=true; schedRender(); }, e=>{ S.loaded.customers=true; schedRender(); }));
-    subCol('jobs', F.query(c('jobs'), F.where('customerId','==',uid)));
-  } else if(role==='technician'){
-    subCol('jobs', F.query(c('jobs'), F.where('techId','==',uid)));
-    subCol('openJobs', F.query(c('jobs'), F.where('open','==',true)));
-    S.need.push('chats'); unsubs.push(F.onSnapshot(d('chats',uid), s=>{ S.chats = s.exists()? [{...s.data(), id:s.id}] : []; S.loaded.chats=true; schedRender(); }, e=>{ S.loaded.chats=true; schedRender(); }));
-  }
-  startInbox();
-  registerPush();
-}
-function startInbox(){
-  let first=true;
-  S.need.push('inbox');
-  unsubs.push(F.onSnapshot(F.query(c('inbox',inboxId(),'items'), F.orderBy('at','desc'), F.limit(50)), s=>{
-    const items=snapList(s), prev=new Set((S.inbox||[]).map(x=>x.id));
-    if(!first) items.filter(it=>!it.read && !prev.has(it.id)).forEach(alertItem);
-    first=false; S.inbox=items; S.loaded.inbox=true;
-    try{ const n=items.filter(x=>!x.read).length; setTitle(); n? navigator.setAppBadge?.(n).catch(()=>{}) : navigator.clearAppBadge?.().catch(()=>{}); }catch(e){}
-    schedRender();
-  }, e=>{ console.warn('inbox',e); S.loaded.inbox=true; schedRender(); }));
-}
-function syncMsgSub(){
-  const sj = UI.sel && job(UI.sel);
-  // A technician only reads messages on jobs they have; an open job they haven't taken has none for them.
-  const id = sj && (ME.role!=='technician' || sj.techId===ME.user.uid) ? sj.id : null;
-  if(msgSub.id===id) return;
-  if(msgSub.un) msgSub.un(); msgSub={id, un:null};
-  if(!id) return;
-  msgSub.un = F.onSnapshot(F.query(c('jobs',id,'messages'), F.orderBy('at')), s=>{ S.msgs[id]=snapList(s); schedRender(); }, e=>console.warn('messages',e));
-}
-// The first screen only waits for what it shows; everything else fills in as it arrives.
-const FIRST_SCREEN = {provider:['jobs'], customer:['customers','jobs'], technician:['jobs']};
-function ready(){ return S.pub.company && S.pub.portal && ME.role && (FIRST_SCREEN[ME.role]||[]).every(k=>S.loaded[k]); }
-const loaded = (...keys) => keys.every(k=>S.loaded[k]);
-
-/* ---------- auth ---------- */
-function startAuth(){
-  F.onSnapshot(tenantRef(), s=>{ S.tenant=s.exists()? s.data() : null; S.tenantErr=null; rememberCompany(S.tenant?.status==='active'); S.pub.tenant=true; schedRender(); }, e=>{ console.error('Company lookup failed', e); S.tenant=null; S.tenantErr=e?.code||'error'; S.pub.tenant=true; schedRender(); });
-  // Public documents every portal needs before sign-in: who owns the portal, company branding, portal settings.
-  F.onSnapshot(d('config','owner'), s=>{ OWNER_EXISTS=s.exists(); schedRender(); }, ()=>{ OWNER_EXISTS=true; schedRender(); });
-  F.onSnapshot(d('config','portal'), s=>{ S.portal=s.exists()? s.data() : null; S.pub.portal=true; schedRender(); }, ()=>{ S.pub.portal=true; schedRender(); });
-  F.onSnapshot(d('company','profile'), s=>{ S.company=s.exists()? s.data() : null; S.pub.company=true; setTitle(); updateIcons(); schedRender(); }, ()=>{ S.pub.company=true; schedRender(); });
-  F.onSnapshot(d('company','brand'), s=>{ S.brand=s.exists()? s.data() : null; applyBrand(S.brand); schedRender(); }, ()=>{});
-  let profUn=null;
-  A.onAuthStateChanged(auth, user=>{
-    if(profUn){ profUn(); profUn=null; }
-    stopSubs(); stopGPS();
-    ME.user=user; ME.profile=null; ME.role=null; ME.profileLoaded=false; UI.sel='';
-    if(user){
-      // Start straight away with the profile remembered on this device; the live profile corrects it if it changed.
-      const key=`acsp-me-${CO}-${user.uid}`;
-      try{ const cached=JSON.parse(localStorage.getItem(key)||'null');
-        if(cached && cached.role===PORTAL_ROLE && (cached.status||'active')==='active'){ ME.profile=cached; ME.profileLoaded=true; ME.role=cached.role; startSubs(); } }catch(e){}
-      profUn = F.onSnapshot(d('users',user.uid), s=>{
-        ME.profile = s.exists()? s.data() : null; ME.profileLoaded=true;
-        try{ ME.profile ? localStorage.setItem(key, JSON.stringify({name:ME.profile.name||'', role:ME.profile.role, status:ME.profile.status||'active', phone:ME.profile.phone||'', email:ME.profile.email||''})) : localStorage.removeItem(key); }catch(e){}
-        const ok = ME.profile && ME.profile.role===PORTAL_ROLE && (ME.profile.status||'active')==='active';
-        const role = ok ? ME.profile.role : null;
-        if(role!==ME.role){ ME.role=role; UI.sel=''; if(role) startSubs(); else stopSubs(); }
-        if(role==='provider') claimSite();
-        schedRender();
-      }, e=>{ ME.profileLoaded=true; toast(errMsg(e)); schedRender(); });
-    }
-    schedRender();
-  });
-}
-async function createProfile(dd, kind){
-  // One-company site set up with Google sign-in: the company doesn't exist yet, create it first.
-  if(kind==='owner' && CO===FIRST_RUN_CO && !S.tenant) await F.setDoc(tenantRef(), {name:dd.company||UI.ownerDraft?.company||'', status:'active', createdAt:nowISO()});
-  const u=ME.user, b=F.writeBatch(db);
-  const base={name:dd.name, email:(u.email||dd.email||'').toLowerCase(), phone:dd.phone||'', status:'active', createdAt:nowISO()};
-  if(kind==='owner'){
-    b.set(d('users',u.uid), {...base, role:'provider'});
-    b.set(d('config','owner'), {uid:u.uid, at:nowISO()});
-  } else {
-    b.set(d('users',u.uid), {...base, role:'customer'});
-    b.set(d('customers',u.uid), {name:dd.name, phone:dd.phone||'', email:base.email, island:dd.island||'', address:dd.address||'', hasLogin:true, createdAt:nowISO()});
-  }
-  await b.commit();
-  if(kind==='owner'){ const nm=dd.company || UI.ownerDraft?.company || (CO===FIRST_RUN_CO ? S.tenant?.name : '');
-    await F.setDoc(d('company','profile'), {phone:dd.phone||'', email:base.email, ...(nm?{name:nm}:{})}, {merge:true});
-    if(nm && nm!==S.tenant?.name) await F.updateDoc(tenantRef(), {name:nm, updatedAt:nowISO()}).catch(()=>{}); }
-}
-// The admin creates sign-in accounts for technicians, office staff and phone customers.
-// A temporary second Firebase app is used so the admin stays signed in.
-async function createLogin(email, password){
-  const sec = appMod.initializeApp(firebaseConfig, 'creator-' + Date.now());
-  try{ const sa=A.getAuth(sec); const cr=await A.createUserWithEmailAndPassword(sa, email, password); await A.signOut(sa); return cr.user.uid; }
-  catch(e){
-    if(!String(e?.code).includes('email-already-in-use')) throw e;
-    // Left over from a login that was deleted before: the manageLogin function can reuse it.
-    try{ return (await callAdmin('create', {email, password})).uid; }
-    catch(err){ if(err.fnMissing) throw {message:`${email} already has a login, maybe from before. Deploy the manageLogin function (README) to reuse it, or delete it in Firebase console → Authentication → Users.`}; throw err; }
-  }
-  finally{ appMod.deleteApp(sec).catch(()=>{}); }
-}
-/* Office-only actions that need Firebase's admin rights (the manageLogin Cloud Function, Blaze plan):
-   delete a login completely, or reuse an email whose login was deleted before. */
-let fnMod=null;
-async function callAdmin(action, data){
-  const M = fnMod || (fnMod = await import(FB+'firebase-functions.js'));
-  const fn = M.httpsCallable(M.getFunctions(fbApp, SETTINGS.functionsRegion || 'asia-south1'), 'manageLogin');
-  try{ return (await fn({action, co:CO, ...data})).data; }
-  catch(e){
-    const c=String(e?.code||'');
-    // Not deployed (or no Blaze plan): Firebase answers "not found" / "internal" without our own message.
-    if(c==='functions/internal' || c==='functions/unavailable' || (c==='functions/not-found' && !/company|login/i.test(e.message||''))) e.fnMissing=true;
-    throw e;
-  }
-}
-
-/* Back button in the Android apps: close what's open first, the app handles the rest. */
-window.__nativeBack = () => {
-  if(UI.modal){ UI.modal=null; render(); return true; }
-  if(UI.bell){ UI.bell=false; render(); return true; }
-  if(UI.qi || UI.newJob || UI.editCust){ UI.qi=null; UI.newJob=null; UI.editCust=null; render(); return true; }
-  if(UI.sel){ UI.sel=''; try{ saveUI(); }catch(e){} render(); scrollTo(0,0); return true; }
-  if(PORTAL==='customer' && UI.ctab && UI.ctab!=='home'){ UI.ctab='home'; UI.bk=null; try{ saveUI(); }catch(e){} render(); scrollTo(0,0); return true; }
-  if(PORTAL==='technician' && UI.tview && UI.tview!=='jobs'){ UI.tview='jobs'; render(); return true; }
-  return false;
-};
-
-/* ---------- update available ----------
-   Every few minutes (and when the app comes back to the front) the portal checks whether its files changed on
-   the server. If they did, a bar offers "Update", which reloads with the new version. */
-const UPD_FILES=['/js/core.js', `/js/${{customer:'customer',technician:'technician',admin:'admin'}[PORTAL]||'core'}.js`, '/css/styles.css', `/${PORTAL_URL[PORTAL]||'index.html'}`];
-let UPD_BASE=null, UPD_READY=false;
-async function filesStamp(){
-  const parts=await Promise.all(UPD_FILES.map(u=>fetch(u,{method:'HEAD', cache:'no-store'})
-    .then(r=>r.ok ? (r.headers.get('etag')||r.headers.get('last-modified')||r.headers.get('content-length')||'') : null).catch(()=>null)));
-  return parts.some(p=>p===null) ? null : parts.join('|');
-}
-async function checkUpdate(){
-  if(UPD_READY || !navigator.onLine || location.protocol==='file:') return;
-  const stamp=await filesStamp(); if(!stamp) return;
-  if(UPD_BASE===null){ UPD_BASE=stamp; return; }
-  if(stamp!==UPD_BASE){ UPD_READY=true; showUpdateBar(); }
-}
-function showUpdateBar(){
-  if(document.getElementById('upd-bar')) return;
-  const bar=document.createElement('div'); bar.id='upd-bar'; bar.setAttribute('role','status');
-  bar.innerHTML=`<span><b>Update available</b> A new version of the portal is ready.</span><button class="btn sm primary" type="button">Update</button>`;
-  bar.querySelector('button').onclick=async()=>{ bar.querySelector('button').textContent='Updating…';
-    try{ const r=await navigator.serviceWorker?.getRegistration(); await r?.update(); }catch(e){}
-    try{ localStorage.removeItem(`acsp-shell-${CO}-${PORTAL}`); }catch(e){}
-    location.reload(); };
-  document.body.appendChild(bar);
-}
-setTimeout(checkUpdate, 3000);
-setInterval(checkUpdate, 5*60*1000);
-document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) checkUpdate(); });
-
-/* ---------- render ---------- */
-const P = {view:()=> '', actions:{}, forms:{}, change:{}};
-let rq=false;
-function schedRender(){ if(rq) return; rq=true; requestAnimationFrame(()=>{ rq=false; render(); }); }
-function render(){
-  const app=$('#app'), saved={}; let focus=null;
-  app.querySelectorAll('input[id],select[id],textarea[id]').forEach(el=>{ if(el.dataset.np===undefined) saved[el.id]={v:el.value,c:el.checked}; });
-  const ae=document.activeElement;
-  if(ae && ae.id && app.contains(ae)){ focus={id:ae.id}; try{ focus.s=ae.selectionStart; focus.e=ae.selectionEnd; }catch(e){} }
-  const scrolls={}; app.querySelectorAll('[data-keep-scroll]').forEach(el=>scrolls[el.dataset.keepScroll]=[el.scrollTop, el.scrollHeight-el.scrollTop-el.clientHeight<8]);
-  const html = view();
-  if(WAITING && app.classList.contains('shell') && Date.now()-BOOT < 15000) return;
-  app.innerHTML = html; app.classList.remove('shell');
-  saveShell(html);
-  for(const id in saved){ const el=document.getElementById(id); if(!el || el.dataset.np!==undefined) continue;
-    if(el.type==='checkbox'||el.type==='radio') el.checked=saved[id].c; else if(el.type!=='file') el.value=saved[id].v; }
-  app.querySelectorAll('[data-keep-scroll]').forEach(el=>{ const k=el.dataset.keepScroll, v=scrolls[k]; el.scrollTop = (!v || v[1]) ? el.scrollHeight : v[0]; });
-  if(focus){ const el=document.getElementById(focus.id); if(el){ el.focus({preventScroll:true}); try{ if(focus.s!=null) el.setSelectionRange(focus.s,focus.e); }catch(e){} } }
-  attachMaps();
-  if(ME.role){ syncMsgSub(); syncChatSub(); markChatRead(); }
-  ensureGPS();
-}
-
-// Remember the last full screen so the next visit can show it instantly while loading.
-let shellT; const BOOT=Date.now();
-function saveShell(html){
-  if(!ME.role || !ready() || UI.bell || UI.modal) return;
-  clearTimeout(shellT);
-  shellT=setTimeout(()=>{ try{ if(html.length<400000) localStorage.setItem(`acsp-shell-${CO}-${PORTAL}`, html); }catch(e){} }, 1200);
-}
-// Remember this company so opening the site without a code (or the Home Screen app) comes straight back here.
-function rememberCompany(ok){ try{ if(ok) localStorage.setItem('acsp-co', CO); else if(localStorage.getItem('acsp-co')===CO) localStorage.removeItem('acsp-co'); }catch(e){} }
-const switchHref = () => IN_APP ? '/app.html?switch=1' : `/${PORTAL_URL[PORTAL]}?switch=1`;
-// Small corner button on the sign-in page for opening another company (the code is otherwise remembered).
-const coSwitchIcon = () => SINGLE ? '' : `<a class="co-switch" href="${switchHref()}" title="Change company" aria-label="Change company"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-5h6v5M9 10h.01M15 10h.01M9 13h.01M15 13h.01"/></svg></a>`;
-function clearDeviceCopies(){ try{ Object.keys(localStorage).filter(k=>k.startsWith(`acsp-shell-${CO}-`)||k.startsWith(`acsp-me-${CO}-`)).forEach(k=>localStorage.removeItem(k)); }catch(e){} }
-function findCompanyView(){
-  return `<div class="auth"><section class="auth-hero"><div class="brand" style="margin:0">${markSVG()}<div><b>AC Service Portal</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
-    <h1>Which company are you with?</h1><p>Each service company has its own address. Use the link your company sent you, or enter its company code.</p></section>
-    <section class="auth-form"><form class="auth-card" data-form="findCompany"><h2>Find your company</h2>
-      <label class="field"><span>Company code</span><input id="fc-code" name="code" placeholder="e.g. reefside" autocapitalize="none" autocomplete="off" required></label>
-      <button class="btn primary block">Continue</button>
-      <p class="small muted" style="margin-top:14px">Setting up the platform or adding a company? <a href="/platform.html">Open the platform admin</a></p></form></section></div>`;
-}
-// While the portal is still loading, the instant screen from the last visit stays up instead of a spinner.
-let WAITING=false;
-const waiting = (html, keepShell=true) => { WAITING=keepShell; return html; };
-function view(){
-  WAITING=false;
-  if(!CONFIGURED) return setupView();
-  if(!CO) return window.__REDIRECTING ? '' : findCompanyView();
-  if(!S.pub.tenant) return waiting(`<div class="loading">Opening…</div>`);
-  if(!S.tenant && S.tenantErr==='permission-denied') return gateView("The database blocked this page", `Firestore refused to read company <b>${esc(CO)}</b>. Publish the latest <b>firestore.rules</b> in Firebase console → Firestore Database → Rules, then reload.`);
-  if(!S.tenant && S.tenantErr) return gateView("Couldn't reach the database", `Check your internet connection and reload. (${esc(S.tenantErr)})`);
-  // One company, not set up yet: the office creates it at /admin; customers and technicians wait.
-  if(!S.tenant && SINGLE && CO===FIRST_RUN_CO){
-    if(PORTAL!=='admin') return gateView('Opening soon', `This service isn't set up yet. Please check back soon.`);
-    if(!ME.user && UI.authMode==='signin') UI.authMode='signup';
-  }
-  else if(!S.tenant) return gateView("We couldn't find this company", `There's no company with the code <b>${esc(CO)}</b>. Check the link you were sent.<br><br><span class="small muted">Setting this company up? Create it first on the <a href="/platform.html">platform admin page</a>.</span><br><br><a class="btn block" href="${switchHref()}">Enter a different company code</a>`);
-  if(S.tenant && S.tenant.status!=='active') return gateView(`${esc(S.tenant.name||'This service')} is unavailable`, 'This portal is paused for now. Please contact the company directly.');
-  if(!S.pub.company || !S.pub.portal) return waiting(`<div class="loading">Opening the ${PORTAL_NAME[PORTAL].toLowerCase()}…</div>`);
-  if(!ME.user) return authView();
-  if(!ME.profileLoaded || UI.creating) return waiting(`<div class="loading">Setting up your account…</div>`, !UI.creating);
-  if(!ME.profile){
-    if(PORTAL==='customer') return completeProfileView('customer');
-    if(PORTAL==='admin' && OWNER_EXISTS===false) return ME.user.emailVerified ? completeProfileView('owner') : verifyEmailView();
-    return gateView('No account here yet', PORTAL==='technician'
-      ? 'Technician accounts are created by the office. Ask them to set one up for this email.'
-      : 'This portal is for the service office only.');
-  }
-  if(ME.profile.role!==PORTAL_ROLE){
-    const right = {customer:'customer', technician:'technician', provider:'admin'}[ME.profile.role];
-    return gateView(`This is the ${PORTAL_NAME[PORTAL].toLowerCase()}`, `Your account is ${right==='admin'?'an office':'a '+right} account. Use the ${PORTAL_NAME[right].toLowerCase()} instead.`, right);
-  }
-  if((ME.profile.status||'active')!=='active') return gateView('Your account is paused', `Please contact ${esc(co().name)}${co().phone?' on '+esc(co().phone):''}.`);
-  if(!ready()) return waiting(header()+`<div class="loading">Loading…</div>`);
-  if(UI.pendingJob && job(UI.pendingJob)){ openJobById(UI.pendingJob); UI.pendingJob=null; }
-  if(UI.pendingChat && ME.role!=='customer'){ openChat(UI.pendingChat); UI.pendingChat=null; }
-  const note = PORTAL==='customer'? PCFG().customerNotice : PORTAL==='technician'? PCFG().techNotice : '';
-  return header() + `<main class="wrap">${iosBanner()}${note?`<div class="notice"><b>${esc(co().name)}:</b> ${esc(note)}</div>`:''}${P.view()}</main>` + bellPanel() + modalView();
-}
-function markSVG(){ if(BRAND?.logo) return `<img class="mark logo" src="${esc(BRAND.logo)}" alt="">`; return `<svg class="mark" viewBox="0 0 38 38" aria-hidden="true"><rect class="u" x="3" y="6" width="32" height="16" rx="5"/><line class="l" x1="9" y1="17" x2="29" y2="17"/><path class="w" d="M10 27c2 2 2 4 0 6M19 27c2 2 2 4 0 6M28 27c2 2 2 4 0 6"/></svg>`; }
-function brandName(){ return S.company?.name || S.tenant?.name || 'AC Service Portal'; }
-// The owner must prove they own the email the platform admin entered before claiming the company.
-function verifyEmailView(){
-  return `<div class="auth"><section class="auth-hero"><div class="brand" style="margin:0">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div><h1>Verify your email</h1><p>This keeps anyone else from taking over your company.</p></section>
-    <section class="auth-form"><div class="auth-card"><p>We sent a link to <b>${esc(ME.user.email||'')}</b>. Open it, then come back and tap Continue.</p>
-      <button class="btn primary block" data-act="verifiedContinue">I've verified my email: continue</button>
-      <button class="btn block" data-act="verifySend">Send the link again</button>
-      <button class="linkbtn" data-act="signOut">Use a different account</button></div></section></div>`;
-}
-const PRIVACY_URL = '/privacy.html';
-const privacyLink = () => `<p class="privacy-link"><a href="${PRIVACY_URL}"${IN_APP?"":" target=\"_blank\" rel=\"noopener\""}>Privacy policy</a></p>`;
-function header(){
-  return `<header class="top"><div class="top-in">
-    <div class="brand">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
-    ${PORTAL==='admin'?`<nav class="portal-links"><a href="${portalHref('customer')}" target="_blank" rel="noopener">Customer portal ↗</a><a href="${portalHref('technician')}" target="_blank" rel="noopener">Technician portal ↗</a></nav>`:''}
-    <div class="me">${bellButton()}<span class="avatar">${esc(initials(ME.profile?.name))}</span><div class="me-txt"><div style="font-weight:700;line-height:1.2">${esc(ME.profile?.name||(ME.user?.isAnonymous?'Guest':''))}</div><span class="role-badge ${ME.role}">${ME.role==='provider'?'Office':ME.role==='technician'?'Technician':'Customer'}</span></div>
-    ${IN_APP && !(SINGLE && APP_ROLE)?`<a class="btn sm" href="/app.html?switch=1">${APP_ROLE?'Company':'Switch'}</a>`:''}<button class="btn sm signout" data-act="signOut">Sign out</button></div>
-  </div></header>`;
-}
-function gateView(title, text, linkTo){
-  return `<div class="auth"><section class="auth-hero"><div class="brand" style="margin:0">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div><h1>${esc(title)}</h1></section>
-    <section class="auth-form"><div class="auth-card"><p>${text}</p>${linkTo?`<a class="btn primary block" href="${portalHref(linkTo)}">Open the ${PORTAL_NAME[linkTo].toLowerCase()}</a>`:''}
-    ${ME.user?'<button class="btn block" data-act="signOut">Sign out</button>':''}</div></section></div>`;
-}
-function setupView(){
-  if(CONFIG_ERROR) return `<div class="setup stack"><h1>There's a mistake in firebase-config.js</h1>
-    <p>The browser couldn't read <span class="mono">js/firebase-config.js</span>:</p><pre>${esc(CONFIG_ERROR)}</pre>
-    <p>The most common cause is a missing <span class="mono">};</span> at the end of the <span class="mono">firebaseConfig</span> block, or pasting Firebase's whole snippet (with <span class="mono">import</span> and <span class="mono">initializeApp</span> lines) instead of only the values. The file should look like this:</p>
-    <pre>export const firebaseConfig = {
-  apiKey: "AIza…",
-  authDomain: "your-project.firebaseapp.com",
-  projectId: "your-project",
-  storageBucket: "your-project.appspot.com",
-  messagingSenderId: "1234567890",
-  appId: "1:1234567890:web:abc123"
-};
-
-export const SETTINGS = {
-  currency: "MVR",
-  timeZone: "Indian/Maldives",
-  mapCenter: [4.1755, 73.5093],
-  avgSpeedKmh: 22,
-  gpsIntervalSec: 12
-};</pre></div>`;
-  return `<div class="setup stack"><h1>Connect Firebase</h1>
-    <p>This portal needs a Firebase project before it can run. Open <span class="mono">js/firebase-config.js</span> and paste the web app config from Firebase console → Project settings → Your apps.</p>
-    <pre>export const firebaseConfig = {
-  apiKey: "AIza…",
-  authDomain: "your-project.firebaseapp.com",
-  projectId: "your-project",
-  …
-};</pre><p class="muted">The full setup steps are in README.md.</p></div>`;
-}
-const HERO = {
-  customer:{h:'Cool rooms, without the waiting around.', items:['Book a service and get a confirmed time and quotation.','Follow your technician on the map as they drive to you.','Approve the work, pay the invoice and rate the visit.']},
-  technician:{h:'Your jobs for today, in one place.', items:['See assigned jobs, addresses and what the customer reported.','Start the trip and your location is shared until you arrive.','Write the work report when you finish.']},
-  admin:{h:'Run the whole service desk from here.', items:['Schedule, quote, assign and invoice every request.','Create technician and customer accounts and control both portals.','Books update automatically from invoices and payments.']}
-};
-/* Customers can start without an account: they say what's wrong and where they are (a guest login on this
-   device keeps their requests). The page explains why an account is worth having. */
-const ACCOUNT_PERKS = ['Your services, quotations and invoices in one place','Service reports and a reminder when the next service is due','Your address saved, so booking again takes seconds','Use it on any phone or computer, not just this one'];
-function welcomeView(heroHTML){
-  const cfg=PCFG();
-  return `<div class="auth">${heroHTML}<section class="auth-form"><div class="auth-card welcome">
-      <h2>Need your AC checked?</h2><p class="muted">Tell us what's wrong and where you are. No account needed.</p>
-      <button class="btn coral lg block" data-act="guestStart">Request a service</button>
-      <div class="perks"><b>Or create a free account to keep track</b><ul>${ACCOUNT_PERKS.map(t=>`<li>${esc(t)}</li>`).join('')}</ul>
-        <div class="row">${cfg.customerSignup?'<button class="btn primary" data-act="authMode" data-v="signup">Create account</button>':''}<button class="btn" data-act="authMode" data-v="signin">Sign in</button></div></div>
-    </div>${privacyLink()}${coSwitchIcon()}</section></div>`;
-}
-function authView(){
-  const m=UI.authMode, cfg=PCFG(), hero=HERO[PORTAL];
-  const heroHTML=`<section class="auth-hero"><div class="brand" style="margin:0">${markSVG()}<div><b>${esc(brandName())}</b><small>${PORTAL_NAME[PORTAL]}</small></div></div>
-    <h1>${hero.h}</h1><ul>${hero.items.map((t,i)=>`<li><i>${i+1}</i><span>${t}</span></li>`).join('')}</ul></section>`;
-  if(PORTAL==='customer' && (m==='welcome' || !m) && cfg.customerSignup) return welcomeView(heroHTML);
-  const canSignup = (PORTAL==='customer' && cfg.customerSignup) || (PORTAL==='admin' && OWNER_EXISTS===false);
-  const back = PORTAL==='customer' && cfg.customerSignup ? `<button type="button" class="linkbtn" data-act="authMode" data-v="welcome">← Request a service without an account</button>` : '';
-  const google = PORTAL!=='technician' && !IN_APP ? `<div class="or">or</div><button type="button" class="btn block" data-act="google">Continue with Google</button>` : '';
-  let f='';
-  if(m==='reset') f=`<form class="auth-card" data-form="reset"><h2>Reset your password</h2><p class="muted">We'll email you a link to choose a new password.</p>
-    <label class="field"><span>Email</span><input id="au-email" name="email" type="email" autocomplete="email" required></label>
-    <button class="btn primary block">Send reset link</button><button type="button" class="linkbtn" data-act="authMode" data-v="signin">Back to sign in</button></form>`;
-  else if(m==='signup' && canSignup) f=`<form class="auth-card" data-form="signup"><h2>${PORTAL==='admin'?'Set up your business':'Create your account'}</h2>
-    ${PORTAL==='admin'?`<p class="small muted">This is the first-time setup. The account you create here becomes the main office account.</p>`:''}
-    <div class="grid2"><label class="field"><span>Full name</span><input id="au-name" name="name" autocomplete="name" required></label>
-    <label class="field"><span>Mobile</span><input id="au-phone" name="phone" autocomplete="tel" placeholder="+960 7xx xxxx" required></label></div>
-    ${profileExtraFields(PORTAL==='admin'?'owner':'customer')}
-    <label class="field"><span>Email</span><input id="au-email" name="email" type="email" autocomplete="email" required></label>
-    <label class="field"><span>Password</span><input id="au-pass" name="password" type="password" autocomplete="new-password" minlength="6" required></label>
-    <button class="btn primary block">${PORTAL==='admin'?'Create office account':'Create account'}</button>${google}
-    <p class="small muted">Already have an account? <button type="button" class="linkbtn" data-act="authMode" data-v="signin">Sign in</button></p>${back}</form>`;
-  else f=`<form class="auth-card" data-form="signin"><h2>Sign in</h2>
-    ${PORTAL==='admin'&&OWNER_EXISTS===false?`<div class="notice">No office account exists yet. <button type="button" class="linkbtn" data-act="authMode" data-v="signup">Set up your business</button></div>`:''}
-    <label class="field"><span>Email</span><input id="au-email" name="email" type="email" autocomplete="email" required></label>
-    <label class="field"><span>Password</span><input id="au-pass" name="password" type="password" autocomplete="current-password" required></label>
-    <button class="btn primary block">Sign in</button>${google}
-    <div class="row" style="justify-content:space-between">${PORTAL==='customer'? (cfg.customerSignup?`<button type="button" class="linkbtn" data-act="authMode" data-v="signup">Create an account</button>`:`<span class="small muted">New accounts are set up by the office${co().phone?' · '+esc(co().phone):''}</span>`) : PORTAL==='technician'?`<span class="small muted">Your login comes from the office.</span>`:'<span></span>'}<button type="button" class="linkbtn" data-act="authMode" data-v="reset">Forgot password?</button></div>${back}</form>`;
-  return `<div class="auth">${heroHTML}<section class="auth-form">${f}${privacyLink()}${coSwitchIcon()}</section></div>`;
-}
-function profileExtraFields(kind){
-  if(kind==='owner') return CO===FIRST_RUN_CO
-    ? `<label class="field"><span>Business name</span><input id="au-company" name="company" value="${esc(UI.ownerDraft?.company||S.tenant?.name||'')}" placeholder="e.g. Veyo Aircon Services" required></label>
-       <p class="small muted">You'll add the logo, address, GST TIN and bank accounts next.</p>`
-    : `<p class="small muted">Use the email address you gave the platform admin for <b>${esc(brandName())}</b>.</p>`;
-  return `<div class="grid2"><label class="field"><span>Island / city</span><input id="au-island" name="island" placeholder="Malé, Hulhumalé, Thulusdhoo…"></label>
-    <label class="field"><span>Address</span><input id="au-address" name="address" placeholder="House, road, floor"></label></div>`;
-}
-function completeProfileView(kind){
-  if(kind==='customer' && !PCFG().customerSignup) return gateView('Sign-ups are closed', `New customer accounts are set up by ${esc(co().name)}${co().phone?'. Call '+esc(co().phone):''}.`);
-  return `<div class="auth"><section class="auth-hero"><h1>One more step</h1><p>${kind==='owner'?'Tell us about your business.':'Tell us how to reach you about your bookings.'}</p></section>
-    <section class="auth-form"><form class="auth-card" data-form="completeProfile" data-kind="${kind}"><h2>Your details</h2>
-    <div class="grid2"><label class="field"><span>Full name</span><input id="cp-name" name="name" value="${esc(ME.user.displayName||'')}" required></label>
-    <label class="field"><span>Mobile</span><input id="cp-phone" name="phone" placeholder="+960 7xx xxxx" required></label></div>
-    ${profileExtraFields(kind)}
-    <button class="btn primary block">Continue</button><button type="button" class="linkbtn" data-act="signOut">Use a different account</button></form></section></div>`;
-}
-function jobItem(j, cur){
-  const role=ME.role, t=tech(j.techId); let hn=role==='provider'? hint(j) : '';
-  if(role==='technician' && j.open && j.techId!==ME.user.uid) return `<li><button data-act="openJob" data-id="${j.id}" aria-current="${cur}">
-    <span class="jl-top"><span class="mono">${esc(j.no)}</span><span class="pill orchid">Open job</span></span>
-    <span class="jl-name">${esc(jobTitle(j))}</span>
-    <span class="jl-meta">${esc(j.island||'')} · ${j.units||1} × ${esc(j.acType||'AC')} · ${j.slot?slotText(j.slot):'asked for '+fd(j.preferredDate)}</span>
-    <span class="jl-hint" style="color:var(--orchid-text)">Take this job</span></button></li>`;
-  if(role==='technician' && stage(j)==='awaiting') hn='Accept or decline';
-  return `<li><button data-act="openJob" data-id="${j.id}" aria-current="${cur}">
-    <span class="jl-top"><span class="mono">${esc(j.no)}</span>${pill(j)}</span>
-    <span class="jl-name">${role==='customer'? esc(jobTitle(j)) : esc(j.customerName||'Customer')}</span>
-    <span class="jl-meta">${role==='customer'?'':esc(jobTitle(j))+' · '}${esc(j.island||'')}${j.slot?' · '+slotText(j.slot):j.preferredDate?' · asked for '+fd(j.preferredDate):''}${t&&role!=='technician'?' · '+esc(t.name):''}</span>
-    ${hn?`<span class="jl-hint">${hn}</span>`:''}</button></li>`;
-}
-/* What a technician sees of an open job before taking it: the work, area and time, not the exact address or phone. */
-function openJobDetail(j){
-  const other=S.jobs.find(x=>x.techId===ME.user.uid && x.slot && j.slot && x.slot.date===j.slot.date && !x.finishedAt && !x.cancelled);
-  return `<div class="jd-head"><div><button class="btn sm back" data-act="closeJob">← Back</button></div>
-    <div class="jd-title"><span class="mono">${esc(j.no)}</span><span class="pill orchid">Open job</span></div><h2>${esc(jobTitle(j))}</h2>
-    <p class="muted small">Offered to all technicians ${j.offerAt?fdt(j.offerAt):''}</p></div>
-    <div class="sec"><div class="next"><h3>Want this job?</h3>
-      <p class="small">The first technician to take it gets it. The office and the customer are told straight away, and the full address and contact details appear in your jobs.</p>
-      ${other?`<p class="small"><b>Note:</b> you already have ${esc(other.no)} on ${fd(other.slot.date)}.</p>`:''}
-      <div class="row"><button class="btn teal lg" data-act="takeJob" data-id="${j.id}">Take this job</button></div></div></div>
-    <div class="sec"><h3>The work</h3><div class="kv">
-      <div><span class="label">When</span><b>${j.slot?slotText(j.slot):fd(j.preferredDate)+(j.window?', '+esc(WINDOWS[j.window].split(',')[0].toLowerCase()):'')}</b></div>
-      <div><span class="label">Area</span><b>${esc(j.island||'')}</b></div>
-      <div><span class="label">AC units</span><b>${esc(j.units||1)} × ${esc(j.acType||'AC')}</b></div>
-      <div><span class="label">Capacity</span><b>${esc(j.btu||'Not given')}</b></div></div>
-      ${j.issue?`<div class="callout"><span class="label">Customer's description</span><p>${esc(j.issue)}</p></div>`:''}</div>`;
-}
-/* ---------- job detail ---------- */
-function jobDetail(j){
-  const role=ME.role, s=stage(j);
-  if(role==='technician' && j.techId!==ME.user.uid) return openJobDetail(j);
-  let h=`<div class="jd-head"><div><button class="btn sm back" data-act="closeJob">← Back</button></div>
-    <div class="jd-title"><span class="mono">${esc(j.no)}</span>${pill(j)}</div><h2>${esc(jobTitle(j))}</h2>
-    <p class="muted small">${[esc(j.customerName||''), esc(j.customerPhone||''), esc(addrLine(j))].filter(Boolean).join(' · ')} · Requested ${fdt(j.createdAt)}</p></div>`;
-  if(s!=='cancelled') h+=tracker(j);
-  if(role==='technician') h+=techNext(j);
-  if(j.departedAt) h+=trackingSec(j);
-  if(role==='technician') h+=`<div class="sec"><div class="row" style="justify-content:space-between"><span class="small muted">Questions about this job? Customers don't see this chat.</span><button class="btn sm" data-act="openChat" data-job="${j.id}">Message the office</button></div></div>`;
-  h+=requestSec(j)+scheduleSec(j)+quoteSec(j)+techSec(j)+officeFinishSec(j);
-  if(j.finishedAt) h+=workSec(j)+reportSec(j);
-  h+=invoiceSec(j)+ratingSec(j)+messagesSec(j);
-  if(s!=='cancelled' && !j.departedAt && (role==='provider' || (role==='customer' && PCFG().customerCancel))) h+=`<div class="sec"><div class="row"><button class="btn danger sm ${UI.confirm==='cancel'+j.id?'armed':''}" data-act="cancelJob" data-id="${j.id}">${UI.confirm==='cancel'+j.id?'Tap again to cancel this request':'Cancel request'}</button></div></div>`;
-  if(role==='provider') h+=`<div class="sec"><div class="row"><button class="btn danger sm ${UI.confirm==='deljob'+j.id?'armed':''}" data-act="delJob" data-id="${j.id}">${UI.confirm==='deljob'+j.id?'Tap again: delete permanently, with its quotation, invoice, payments and messages':'Delete this request permanently'}</button></div>
-    <p class="small muted">For mistakes and test entries. To keep a record, cancel instead.</p></div>`;
-  return h;
-}
-function tracker(j){
-  const done=[true, !!j.slot, !!j.quote, accepted(j), !!j.departedAt, !!j.finishedAt, j.payment?.status==='paid'];
-  const cur=done.indexOf(false);
-  return `<div class="trk" aria-label="Progress">${STEPS.map((l,i)=>`<div class="${done[i]?'done':i===cur?'cur':''}"><i></i>${l}</div>`).join('')}</div>`;
-}
-function requestSec(j){
-  return `<div class="sec"><h3>Request</h3><div class="kv">
-    <div><span class="label">AC units</span><b>${esc(j.units||1)} × ${esc(j.acType||'AC')}</b></div>
-    <div><span class="label">Capacity</span><b>${esc(j.btu||'Not given')}</b></div>
-    <div><span class="label">Preferred</span><b>${fd(j.preferredDate)}${j.window?', '+esc((WINDOWS[j.window]||'').split(',')[0]):''}</b></div>
-    <div><span class="label">Address</span><b>${esc(addrLine(j))}</b>${j.dest?`<a class="small" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${j.dest.lat},${j.dest.lng}">Open in Google Maps</a>`:''}</div>
-  </div>${j.issue?`<div class="callout"><span class="label">Customer's description</span><p>${esc(j.issue)}</p></div>`:''}</div>`;
-}
-function scheduleSec(j){
-  const role=ME.role, can=role==='provider' && !j.departedAt && !j.cancelled;
-  let h=`<div class="sec"><div class="sec-h"><h3>Appointment</h3>${j.slot?`<span class="pill lagoon">${slotText(j.slot)}</span>`:''}</div>`;
-  if(can) h+=`<div class="grid3">
-      <label class="field"><span>Date</span><input type="date" id="sd-${j.id}" min="${today()}" value="${esc(j.slot?.date||j.preferredDate||today())}"></label>
-      <label class="field"><span>Time</span><input type="time" id="st-${j.id}" value="${esc(j.slot?.time||({morning:'09:00',afternoon:'13:00',evening:'16:30'}[j.window]||'10:00'))}"></label></div>
-    <label class="field"><span>Reply to customer (optional)</span><textarea id="sm-${j.id}" placeholder="e.g. Our technician will call 15 minutes before arriving. Please clear space around the indoor unit."></textarea></label>
-    <div class="row"><button class="btn ${j.slot?'':'primary'}" data-act="schedule" data-id="${j.id}">${j.slot?'Update appointment':'Confirm appointment'}</button></div>`;
-  else if(!j.slot) h+=`<p class="muted">${role==='customer'?'Waiting for the office to confirm a time. You asked for '+fd(j.preferredDate)+(j.window?', '+esc(WINDOWS[j.window]):'')+'.':'Not scheduled yet.'}</p>`;
-  return h+`</div>`;
-}
-function quoteSec(j){
-  const role=ME.role, Q=j.quote;
-  if(role==='technician') return '';   // technicians never see prices
-  let h=`<div class="sec"><div class="sec-h"><h3>Quotation</h3>${Q?`<span class="pill ${Q.status==='accepted'?'teal':Q.status==='declined'?'bad':'orchid'}">${Q.status==='accepted'?'Accepted':Q.status==='declined'?'Declined':'Awaiting customer'}</span>`:''}</div>`;
-  const editable=role==='provider' && !j.finishedAt && !j.cancelled && (!Q || Q.status!=='accepted');
-  if(Q) h+= role==='customer' ? docFold('Quotation',Q,j,Q.status==='sent') : docView('Quotation',Q,j)+docActions('Quotation',Q,j);
-  // Customers without the app answer by phone or in person: the office records it.
-  if(role==='provider' && Q && !j.invoice) h+=`<div class="row del-row"><button class="btn sm danger ${UI.confirm==='delq'+j.id?'armed':''}" data-act="delQuote" data-id="${j.id}">${UI.confirm==='delq'+j.id?'Tap again to delete the quotation':'Delete quotation'}</button></div>`;
-  if(role==='provider' && Q?.status==='sent') h+=`<div class="callout"><b>Customer's answer</b><p class="small">If they replied by phone, WhatsApp or in person, record it here.</p>
-    <div class="row"><button class="btn teal sm" data-act="officeQuote" data-v="accepted" data-id="${j.id}">Customer accepted</button><button class="btn sm" data-act="officeQuote" data-v="declined" data-id="${j.id}">Customer declined</button></div></div>`;
-  if(Q?.status==='declined' && Q.reason) h+=`<div class="callout coral"><span class="label">Customer's reason</span><p>${esc(Q.reason)}</p></div>`;
-  if(role==='customer' && Q?.status==='sent') h+=`<div class="callout"><b>Do you approve this quotation?</b>
-      <label class="field"><span>Message to the office (optional)</span><textarea id="qr-${j.id}" placeholder="Anything you want to change or ask"></textarea></label>
-      <div class="row"><button class="btn teal" data-act="quoteAccept" data-id="${j.id}">Accept quotation</button><button class="btn" data-act="quoteDecline" data-id="${j.id}">Decline</button></div></div>`;
-  if(!Q && role==='customer') h+=`<p class="muted">No quotation yet. The office may send one before the visit.</p>`;
-  if(editable){
-    const key='q-'+j.id;
-    if(Q && !UI.ed[key] && UI.confirm!=='rev'+j.id) h+=`<div class="row"><button class="btn" data-act="reviseQuote" data-id="${j.id}">Revise quotation</button></div>`;
-    else {
-      const init=Q? {lines:clone(Q.lines), discount:Q.discount||0, notes:Q.notes||''} : {lines:(j.serviceIds||[]).map(sv).filter(Boolean).map(s=>({desc:s.name,qty:j.units||1,rate:s.price})), discount:0, notes:'Price includes labour. Parts or gas beyond the listed quantities are charged separately.'};
-      h+=`<div class="callout">${lineEditor(key,init)}
-        <label class="field"><span>Terms and notes</span><textarea id="${key}-notes" data-np data-ed="${key}" data-f="notes">${esc(UI.ed[key].notes)}</textarea></label>
-        <div class="row"><button class="btn primary" data-act="sendQuote" data-id="${j.id}">${Q?'Send revised quotation':'Send quotation'}</button></div></div>`;
-    }
-  }
-  return h+`</div>`;
-}
-function lineEditor(key, init){
-  if(!UI.ed[key]) UI.ed[key]=clone(init);
-  const e=UI.ed[key];
-  return `<div class="lines"><div class="lrow lhead"><span>Description</span><span>Qty</span><span>Rate</span><span class="lamt">Amount</span><span></span></div>
-    ${e.lines.map((l,i)=>`<div class="lrow">
-      <input id="${key}-d${i}" data-np data-ed="${key}" data-f="lines.${i}.desc" value="${esc(l.desc)}" placeholder="Description" aria-label="Description">
-      <input id="${key}-q${i}" data-np data-ed="${key}" data-f="lines.${i}.qty" type="number" min="0" step="1" value="${esc(l.qty)}" aria-label="Quantity">
-      <input id="${key}-r${i}" data-np data-ed="${key}" data-f="lines.${i}.rate" type="number" min="0" step="0.01" value="${esc(l.rate)}" aria-label="Rate">
-      <span class="lamt mono" data-amt="${key}-${i}">${money((+l.qty||0)*(+l.rate||0))}</span>
-      <button class="icon" data-act="rmLine" data-key="${key}" data-i="${i}" aria-label="Remove line">×</button></div>`).join('')}
-    <div class="row" style="margin-top:4px">
-      <select id="${key}-add" data-np data-change="addSvcLine" data-key="${key}" aria-label="Add a service" style="max-width:260px"><option value="">+ Add a service…</option>${S.services.map(s=>`<option value="${s.id}">${esc(s.name)} · ${money(s.price)}</option>`).join('')}</select>
-      <button class="btn sm" data-act="addLine" data-key="${key}">+ Custom line</button></div>
-    <div class="row" style="justify-content:space-between;align-items:flex-end;margin-top:6px">
-      <label class="field" style="max-width:160px"><span>Discount (${CUR})</span><input id="${key}-disc" data-np data-ed="${key}" data-f="discount" type="number" min="0" step="0.01" value="${esc(e.discount||0)}"></label>
-      <div class="tot" data-tot="${key}">${totHTML(totals(e))}</div></div></div>`;
-}
-function totHTML(t){ return `<span>Subtotal</span><span>${money(t.sub)}</span>${t.disc?`<span>Discount</span><span>−${money(t.disc)}</span>`:''}<span>GST ${t.rate}%</span><span>${money(t.gst)}</span><span class="grand">Total</span><span class="grand">${money(t.total)}</span>`; }
-function updateTotals(key){
-  const e=UI.ed[key]; if(!e) return;
-  const el=document.querySelector(`[data-tot="${key}"]`); if(el) el.innerHTML=totHTML(totals(e));
-  e.lines.forEach((l,i)=>{ const a=document.querySelector(`[data-amt="${key}-${i}"]`); if(a) a.textContent=money((+l.qty||0)*(+l.rate||0)); });
-}
-function docView(kind, dc, j){
-  const C=co(), t=totals(dc), inv=kind==='Invoice', paid=inv && j.payment?.status==='paid';
-  return `<div class="doc ${inv?'invoice':''}">
-    <div class="doc-h"><div>${BRAND?.logo?`<img class="doc-logo" src="${esc(BRAND.logo)}" alt="${esc(C.name)} logo">`:''}<h3>${esc(C.name)}</h3><p class="small muted">${esc(C.address)}${C.phone?'<br>'+esc(C.phone):''}${C.email?' · '+esc(C.email):''}${C.tin?'<br>GST TIN '+esc(C.tin):''}</p></div>
-      <div><div class="doc-kind">${kind}</div><p class="small mono" style="text-align:right">${esc(dc.no)}<br>${inv?'Issued '+fd(dc.issuedAt)+'<br>Due '+fd(dc.dueDate):'Sent '+fd(dc.sentAt)+'<br>Valid until '+fd(dc.validUntil)}</p></div></div>
-    <div class="small"><span class="label">Bill to</span><br><b>${esc(j.customerName||'')}</b><br>${[esc(addrLine(j)), esc(j.customerPhone||'')].filter(Boolean).join(' · ')}${custTin(j)?`<br>TIN ${esc(custTin(j))}`:''}</div>
-    <div class="tscroll"><table><thead><tr><th>Description</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead>
-      <tbody>${(dc.lines||[]).map(l=>`<tr><td>${esc(l.desc)}</td><td class="r">${esc(l.qty)}</td><td class="r">${money(l.rate)}</td><td class="r">${money((+l.qty||0)*(+l.rate||0))}</td></tr>`).join('')}</tbody></table></div>
-    <div class="doc-foot"><div class="small muted" style="max-width:360px">${esc(dc.notes||'')}${inv&&(dc.methods||[]).length?`<br><br><b>Pay by:</b> ${(dc.methods||[]).map(m=>METHODS[m]?.n).join(', ')}${(dc.methods||[]).includes('bml')&&C.bml?`<br>BML ${esc(C.bml)}`:''}${(dc.methods||[]).includes('mib')&&C.mib?`<br>MIB ${esc(C.mib)}`:''}`:''}</div>
-      <div class="row" style="gap:16px;margin-left:auto">${paid?'<span class="stamp">PAID</span>':''}<div class="tot">${totHTML(t)}</div></div></div></div>`;
-}
-function techSec(j){
-  const role=ME.role; if(role==='technician') return '';
-  const t=tech(j.techId), showT = t && (role==='provider' || accepted(j));
-  let h=`<div class="sec"><div class="sec-h"><h3>Technician</h3>${role==='provider'&&j.techId?(accepted(j)?`<span class="pill teal">Accepted ${j.acceptedAt?ft(j.acceptedAt):''}</span>`:`<span class="pill mango">Waiting for ${esc(t?.name?.split(' ')[0]||'technician')} to accept</span>`):role==='provider'&&j.open?'<span class="pill orchid">Open to all technicians</span>':''}</div>`;
-  if(showT){ const ar=avgRating(t.id); h+=`<div class="row"><span class="avatar">${initials(t.name)}</span><div><b>${esc(t.name)}</b><p class="small muted">${role==='customer' && !PCFG().showTechPhone ? '' : esc(t.phone||'')}${ar?' · '+stars(ar.avg)+' '+ar.avg.toFixed(1):''}</p></div></div>`; }
-  if(role==='provider' && t) h+=`<div><button class="btn sm" data-act="openChat" data-id="${t.id}" data-job="${j.id}">Chat with ${esc(t.name.split(' ')[0])} about this job</button></div>`;
-  if(role==='provider'){
-    if(j.declined && !j.techId) h+=`<div class="callout coral"><b>${esc(j.declined.name)} declined this job</b><p class="small">${fdt(j.declined.at)}${j.declined.reason?' · “'+esc(j.declined.reason)+'”':''}</p></div>`;
-    if(j.open) h+=`<div class="callout"><p class="small">Offered to every technician ${j.offerAt?'since '+fdt(j.offerAt):''}. The first one to take it gets it, and you'll be notified.</p><div><button class="btn sm" data-act="stopOffer" data-id="${j.id}">Stop offering</button></div></div>`;
-  }
-  if(role==='provider' && !j.departedAt && !j.cancelled){
-    if(!S.techs.length) h+=`<p class="muted">Add technicians in the Team tab to assign this job.</p>`;
-    else h+=`<div class="assign-box">
-      <div class="stack"><span class="label">Send to one technician</span><p class="small muted">They get an alert and must accept the job.</p>
-        <div class="row"><select id="as-${j.id}" aria-label="Choose technician" style="max-width:260px">${S.techs.map(x=>`<option value="${x.id}" ${x.id===j.techId?'selected':''}>${esc(x.name)}${busyTech(x.id,j.id)?' (on a job)':''}</option>`).join('')}</select>
-        <button class="btn ${j.techId?'':'primary'}" data-act="assign" data-id="${j.id}">${j.techId?'Send to someone else':'Send job'}</button></div></div>
-      ${j.open?'':`<div class="stack"><span class="label">Or offer to every technician</span><p class="small muted">All technicians get an alert. The first to take it gets the job.</p>
-        <div><button class="btn" data-act="offerAll" data-id="${j.id}">Offer to all technicians</button></div></div>`}</div>`;
-  } else if(!showT) h+=`<p class="muted">${j.techId||j.open?"We're confirming your technician now.":'A technician will be assigned before your visit.'}</p>`;
-  return h+`</div>`;
-}
-const busyTech = (tid, except) => S.jobs.some(j=>j.id!==except && j.techId===tid && j.departedAt && !j.finishedAt && !j.cancelled);
-function techNext(j){
-  const s=stage(j); let h=`<div class="sec"><div class="next">`;
-  const other=myActiveTrip();
-  if(s==='awaiting'){
-    h+=`<h3>New job for you</h3><p class="small">The office sent you this job${j.assignedAt?' at '+ft(j.assignedAt):''}. Accept it to add it to your jobs, or decline so it can go to someone else.</p>
-      <label class="field"><span>Reason, if you decline (optional)</span><input id="dr-${j.id}" placeholder="e.g. Already booked that morning"></label>
-      <div class="row"><button class="btn teal lg" data-act="acceptJob" data-id="${j.id}">Accept job</button><button class="btn danger" data-act="declineJob" data-id="${j.id}">Decline</button></div>`;
-  } else if(['assigned','scheduled','quoted','approved'].includes(s) && other && other.id!==j.id){
-    h+=`<h3>You're still on the way to ${esc(other.no)}</h3><p class="small">Tap "I've arrived" on that job before starting this trip.</p>`;
-  } else if(['assigned','scheduled','quoted','approved'].includes(s)){
-    h+=`<h3>Leaving for this job?</h3><p class="small">Starting the trip shares your phone's location with the customer and the office until you arrive. ${IN_APP?'You can lock your phone while you drive.':'Keep this page open while you travel.'}</p>
-      <div class="row"><label class="field" style="max-width:170px"><span>Travel time (minutes)</span><input id="eta-${j.id}" type="number" min="1" max="240" value="25"></label>
-      <button class="btn teal" data-act="startTrip" data-id="${j.id}" style="align-self:flex-end">Start trip</button></div>`;
-  } else if(s==='enroute' && staleTrip(j)){
-    h+=`<h3>Location sharing stopped</h3><p class="small">This trip started more than ${STALE_H} hours ago, so your location is no longer shared. Tap "I've arrived" if you're there.</p>
-      <div class="row"><button class="btn teal" data-act="arrived" data-id="${j.id}">I've arrived</button></div>`;
-  } else if(s==='enroute'){
-    const near = j.dest && GPS.last && haversineKm(GPS.last, j.dest) < 0.15;
-    if(near) h+=`<div class="callout teal"><b>You're at the customer's location.</b> Tap "I've arrived" to stop sharing your location.</div>`;
-    h+=`<h3>You're on the way</h3><p class="small">${GPS.error?`<b style="color:var(--coral-text)">${esc(GPS.error)}</b>`:GPS.watchId!=null?(IN_APP?'Sharing your location. You can lock your phone.':'Sharing your location. Keep this page open.'):'Starting location sharing…'}</p>
-      <div class="row"><button class="btn teal" data-act="arrived" data-id="${j.id}">I've arrived</button>${j.dest?`<a class="btn" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${j.dest.lat},${j.dest.lng}">Directions</a>`:''}</div>`;
-  } else if(s==='onsite'){
-    h+=`<h3>Finish the job</h3><p class="small">Fill in the service report. The customer gets it when you or the office send it.</p>
-      ${reportForm(j, 'rf-'+j.id)}
-      <div class="row"><button class="btn teal" data-act="finish" data-id="${j.id}">Mark job finished</button></div>`;
-  } else if(s==='cancelled') h+=`<h3>This request was cancelled</h3>`;
-  else h+=`<h3>Job finished ${fdt(j.finishedAt)}</h3><p class="small">${j.payment?.status==='paid'?'Paid. Nothing left to do.':j.payment?.status==='pending'?'The customer will pay by '+METHODS[j.payment.method]?.n.toLowerCase()+'. Collect it and hand it to the office.':j.invoice?'Invoice raised. Waiting for the customer to pay.':'The office will raise the invoice.'}</p>`;
-  return h+`</div></div>`;
-}
-
-/* ---------- live tracking ---------- */
-function trackingSec(j){
-  const t=tech(j.techId), live=j.departedAt && !j.arrivedAt;
-  if(j.arrivedAt){
-    const mins=j.trip?.mins ?? Math.max(1,Math.round((new Date(j.arrivedAt)-new Date(j.departedAt))/60000));
-    return `<div class="sec"><div class="sec-h"><h3>Trip</h3><span class="pill mute">Location sharing ended</span></div>
-      <p class="small">${esc(t?.name||'The technician')} left at ${ft(j.departedAt)} and arrived at ${ft(j.arrivedAt)}: ${mins} min${j.trip?.km?`, about ${j.trip.km} km`:''}. Location sharing stopped on arrival and the route was deleted.</p></div>`;
-  }
-  if(staleTrip(j)) return `<div class="sec"><div class="sec-h"><h3>Trip</h3><span class="pill mute">Location sharing stopped</span></div>
-      <p class="small">Location sharing stopped automatically because this trip started more than ${STALE_H} hours ago. The route was deleted.</p></div>`;
-  return `<div class="sec"><div class="sec-h"><h3>${live?'Live location':'Trip'}</h3>${live?'<span class="pill live">Live</span>':`<span class="small muted">Arrived ${fdt(j.arrivedAt)}</span>`}</div>
-    <div class="eta" data-eta="${j.id}">${etaHTML(j)}</div>
-    <div class="map" data-map="track-${j.id}" role="img" aria-label="Map of ${esc(t?.name||'the technician')}'s trip"></div>
-    <p class="small muted">${esc(t?.name||'Technician')} left at ${ft(j.departedAt)}.</p></div>`;
-}
-function etaHTML(j){
-  if(j.arrivedAt) return `<div><span class="label">Status</span><br><b>Arrived</b></div><div><span class="label">Trip time</span><br><b>${Math.max(1,Math.round((new Date(j.arrivedAt)-new Date(j.departedAt))/60000))} min</b></div>`;
-  const planned=new Date(new Date(j.departedAt).getTime()+(+j.etaMins||25)*60000).toISOString();
-  if(j.loc && j.dest){
-    const km=haversineKm(j.loc,j.dest)*1.25, mins=Math.max(1,Math.round(km/(SETTINGS.avgSpeedKmh||22)*60));
-    return `<div><span class="label">Arriving in</span><br><b>${km<0.15?'Any minute':'~'+mins+' min'}</b></div><div><span class="label">Distance</span><br><b>${km.toFixed(1)} km</b></div><div><span class="label">GPS</span><br><span class="small">Updated ${ago(j.loc.at)}</span></div>`;
-  }
-  return `<div><span class="label">Expected around</span><br><b>${ft(planned)}</b></div><div><span class="label">GPS</span><br><span class="small">${j.loc?'Updated '+ago(j.loc.at):"Waiting for the technician's phone"}</span></div>`;
-}
-setInterval(()=>{ document.querySelectorAll('[data-eta]').forEach(el=>{ const j=job(el.dataset.eta); if(j) el.innerHTML=etaHTML(j); }); }, 5000);
-
-/* Leaflet maps survive re-renders: the map element is detached and re-inserted. */
-const MAPS={};
-function icon(kind, text){ return window.L.divIcon({className:'', html:`<span class="pin pin-${kind}"><span>${esc(text||'')}</span></span>`, iconSize:[34,34], iconAnchor:[17,17]}); }
-const LEAFLET='https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/';
-let leafletP=null;
-function loadLeaflet(){
-  if(window.L) return Promise.resolve();
-  if(!leafletP) leafletP=new Promise((res,rej)=>{
-    const l=document.createElement('link'); l.rel='stylesheet'; l.href=LEAFLET+'leaflet.min.css'; document.head.appendChild(l);
-    const sc=document.createElement('script'); sc.src=LEAFLET+'leaflet.min.js'; sc.onload=()=>{ if(window.L) res(); else rej(new Error('map')); };   // a broken download must not loop
-    sc.onerror=()=>{ leafletP=null; rej(new Error('map')); }; document.head.appendChild(sc);
-  });
-  return leafletP;
-}
-function attachMaps(){
-  const seen=new Set();
-  document.querySelectorAll('[data-map]').forEach(ph=>{
-    const key=ph.dataset.map; seen.add(key);
-    if(!window.L){ ph.innerHTML='<p class="muted small" style="padding:12px">Loading the map…</p>';
-      loadLeaflet().then(schedRender).catch(()=>{ ph.innerHTML='<p class="muted small" style="padding:12px">The map could not load. Check your connection.</p>'; }); return; }
-    let m=MAPS[key];
-    if(m){ ph.replaceWith(m.el); setTimeout(()=>m.map.invalidateSize(),0); }
-    else { m=MAPS[key]=createMap(key, ph); }
-    updateMap(key,m);
-  });
-  for(const k in MAPS) if(!seen.has(k)){ MAPS[k].map.remove(); delete MAPS[k]; }
-}
-function createMap(key, el){
-  const L=window.L, map=L.map(el,{scrollWheelZoom:false});
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19, attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
-  const m={el,map,layers:{},fitted:false};
-  if(key.startsWith('pick-')) map.on('click', e=>{ UI.pick[key.slice(5)]={lat:+e.latlng.lat.toFixed(6), lng:+e.latlng.lng.toFixed(6)}; updateMap(key,m); });
-  return m;
-}
-function setMarker(m, name, ll, ic){
-  const lay=m.layers;
-  if(!ll){ if(lay[name]){ lay[name].remove(); delete lay[name]; } return; }
-  if(lay[name]) lay[name].setLatLng(ll); else lay[name]=window.L.marker(ll,{icon:ic}).addTo(m.map);
-}
-function pickDefault(k){
-  if(k==='co') return S.company?.lat!=null? {lat:S.company.lat,lng:S.company.lng} : null;
-  const me=myCustomer(); return me?.lat!=null? {lat:me.lat,lng:me.lng} : null;
-}
-function updateMap(key, m){
-  const L=window.L, map=m.map;
-  if(key.startsWith('pick-')){
-    const k=key.slice(5), p=UI.pick[k] || pickDefault(k);
-    if(!m.fitted){ map.setView(p?[p.lat,p.lng]:SETTINGS.mapCenter, p?16:13); m.fitted=true; }
-    setMarker(m,'pin', p?[p.lat,p.lng]:null, icon(k==='co'?'office':'home',''));
-    const info=document.querySelector(`[data-pickinfo="${k}"]`); if(info) info.textContent = p? `Pinned at ${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}` : 'Tap the map to drop a pin on the exact location.';
-    return;
-  }
-  const j=job(key.slice(6)); if(!j) return;
-  const C=co(), t=tech(j.techId);
-  const office=C.lat!=null?[C.lat,C.lng]:null, dest=j.dest?[j.dest.lat,j.dest.lng]:null, cur=j.loc?[j.loc.lat,j.loc.lng]:null;
-  setMarker(m,'office',office,icon('office',''));
-  setMarker(m,'dest',dest,icon('home',''));
-  setMarker(m,'tech',cur,icon('tech',initials(t?.name||'T')));
-  const trail=(j.trail||[]).map(p=>[p.lat,p.lng]);
-  if(m.layers.trail){ m.layers.trail.setLatLngs(trail); } else if(trail.length>1){ m.layers.trail=L.polyline(trail,{color:getComputedStyle(document.documentElement).getPropertyValue('--teal').trim()||'#00A08E',weight:5,opacity:.85}).addTo(map); }
-  if(!m.fitted){ const pts=[office,dest,cur].filter(Boolean); if(pts.length>1) map.fitBounds(pts,{padding:[40,40],maxZoom:16}); else map.setView(pts[0]||SETTINGS.mapCenter, pts.length?15:12); m.fitted=true; }
-  else if(cur && !map.getBounds().contains(cur)) map.panTo(cur);
-}
-
-/* ---------- technician GPS ---------- */
-const GPS={watchId:null, jobId:null, last:null, lastWrite:0, error:'', wake:null};
-function myActiveTrip(){ return ME.role==='technician' ? S.jobs.find(j=>j.techId===ME.user.uid && j.departedAt && !j.arrivedAt && !j.finishedAt && !j.cancelled && !staleTrip(j)) : null; }
-const CLEARED=new Set();
-function ensureGPS(){
-  // Delete any location left on a job whose trip has ended (arrived, finished, cancelled or over STALE_H hours).
-  if(ME.role==='technician' || ME.role==='provider') S.jobs.filter(x=>(x.loc||x.trail) && (x.arrivedAt||x.finishedAt||x.cancelled||staleTrip(x)) && !CLEARED.has(x.id) && (ME.role==='provider'||x.techId===ME.user.uid))
-    .forEach(x=>{ CLEARED.add(x.id); F.updateDoc(d('jobs',x.id),{loc:F.deleteField(), trail:F.deleteField()}).catch(e=>console.warn('clear location',e)); });
-  const j=myActiveTrip();
-  if(!j){ if(GPS.watchId!=null) stopGPS(); return; }
-  if(GPS.watchId!=null && GPS.jobId===j.id) return;
-  stopGPS(); GPS.jobId=j.id;
-  if(window.AndroidApp?.startTracking){
-    window.__nativeLocation = (lat, lng, acc) => { GPS.error=''; sendPos({coords:{latitude:lat, longitude:lng, accuracy:acc}}); };
-    window.__nativeLocationError = msg => { GPS.error=msg||''; schedRender(); };
-    try{ window.AndroidApp.startTracking(j.no||'', (SETTINGS.gpsIntervalSec||12)*1000); GPS.watchId='native'; return; }catch(e){ console.warn('native tracking', e); }
-  }
-  if(!navigator.geolocation){ GPS.error='This browser cannot share location.'; return; }
-  GPS.watchId=navigator.geolocation.watchPosition(p=>{ GPS.error=''; sendPos(p); }, e=>{ GPS.error = e.code===1? 'Location permission is blocked. Allow location for this site in your browser settings.' : 'Waiting for a GPS signal…'; schedRender(); }, {enableHighAccuracy:true, maximumAge:5000, timeout:30000});
-  try{ navigator.wakeLock?.request('screen').then(w=>GPS.wake=w).catch(()=>{}); }catch(e){}
-}
-function stopGPS(){ if(GPS.watchId==='native'){ try{ window.AndroidApp.stopTracking(); }catch(e){} } else if(GPS.watchId!=null && navigator.geolocation) navigator.geolocation.clearWatch(GPS.watchId); GPS.watchId=null; GPS.jobId=null; try{ GPS.wake?.release(); }catch(e){} GPS.wake=null; }
-function sendPos(p){
-  const j=job(GPS.jobId); if(!j || j.arrivedAt || j.finishedAt || j.cancelled || staleTrip(j)) return;
-  const pos={lat:+p.coords.latitude.toFixed(6), lng:+p.coords.longitude.toFixed(6), acc:Math.round(p.coords.accuracy||0), at:nowISO()};
-  const now=Date.now(), gap=now-GPS.lastWrite, moved=GPS.last? haversineKm(GPS.last,pos)*1000 : Infinity;
-  if(gap < (SETTINGS.gpsIntervalSec||12)*1000) return;
-  if(moved < 20 && gap < 60000) return;
-  GPS.lastWrite=now; GPS.last=pos;
-  const trail=[...(j.trail||[]), {lat:pos.lat,lng:pos.lng}].slice(-120);
-  F.updateDoc(d('jobs',j.id),{loc:pos, trail}).catch(e=>console.warn('gps write',e));
-}
-function getPosOnce(){ return new Promise(res=>{ if(!navigator.geolocation) return res(null); navigator.geolocation.getCurrentPosition(p=>res({lat:+p.coords.latitude.toFixed(6),lng:+p.coords.longitude.toFixed(6),acc:Math.round(p.coords.accuracy||0),at:nowISO()}), ()=>res(null), {enableHighAccuracy:true,maximumAge:30000,timeout:10000}); }); }
-
-function workSec(j){
-  return `<div class="sec"><h3>Work report</h3><div class="kv">
-    <div><span class="label">Arrived</span><b>${fdt(j.arrivedAt)||'Not recorded'}</b></div>
-    <div><span class="label">Finished</span><b>${fdt(j.finishedAt)}</b></div>
-    ${j.arrivedAt?`<div><span class="label">Time on site</span><b>${Math.max(1,Math.round((new Date(j.finishedAt)-new Date(j.arrivedAt))/60000))} min</b></div>`:''}</div>
-    ${j.workNotes?`<div class="callout teal"><span class="label">Work done</span><p>${esc(j.workNotes)}</p>${j.parts?`<p class="small">Parts and gas: ${esc(j.parts)}</p>`:''}</div>`:''}</div>`;
-}
-
-
-/* ---------- service report ----------
-   The technician fills it in when finishing (checklist, readings, condition, advice, next service).
-   The office or the technician sends it to the customer, who can view, print or save it as a PDF. */
-const CHECKS = ['Filters cleaned','Indoor coil cleaned','Outdoor coil washed','Drain pipe cleared','Drain pan cleaned','Blower / fan cleaned','Gas pressure checked','Electrical connections checked','Remote / thermostat tested','Test run OK'];
-const CONDITION = {good:['Good','teal'], attention:['Needs attention soon','mango'], repair:['Needs repair','bad']};
-const GASES = ['R32','R410A','R22','Other'];
-const NEXT_MONTHS = [3,4,6,12];
-function addMonths(iso, m){ const x=new Date(iso+'T12:00:00Z'); x.setUTCMonth(x.getUTCMonth()+m); return x.toISOString().slice(0,10); }
-function reportForm(j, px){
-  const r=j.report||{}, rd=r.readings||{}, ck=new Set(r.checks||[]), nm=r.nextMonths||3;
-  const num=(k,l,ph,unit)=>`<label class="field"><span>${l}</span><div class="unit-in"><input id="${px}-${k}" type="number" inputmode="decimal" step="any" value="${esc(rd[k]??'')}" placeholder="${ph}"><i>${unit}</i></div></label>`;
-  return `<div class="report-form">
-    <div class="field"><span>Checklist <small class="muted">(tick what you did)</small></span><div class="checks">${CHECKS.map((c,i)=>`<label class="check"><input type="checkbox" id="${px}-c${i}" ${ck.has(c)?'checked':''}><span>${esc(c)}</span></label>`).join('')}</div></div>
-    <div class="field"><span>Readings <small class="muted">(optional)</small></span>
-      <div class="grid3"><label class="field"><span>Gas</span><select id="${px}-gas">${GASES.map(g=>`<option ${(rd.gas||'R32')===g?'selected':''}>${g}</option>`).join('')}</select></label>
-        ${num('psi','Suction pressure','120','psig')}${num('amps','Running current','5.2','A')}
-        ${num('ret','Return air (room)','26','°C')}${num('sup','Supply air (outlet)','14','°C')}${num('volts','Voltage','230','V')}</div></div>
-    <div class="grid2"><label class="field"><span>Units serviced</span><input id="${px}-units" type="number" min="1" max="50" value="${esc(r.unitsDone||j.units||1)}"></label>
-      <label class="field"><span>Condition after service</span><select id="${px}-cond">${Object.entries(CONDITION).map(([k,[l]])=>`<option value="${k}" ${(r.condition||'good')===k?'selected':''}>${l}</option>`).join('')}</select></label></div>
-    <label class="field"><span>Work done</span><textarea id="${px}-notes" placeholder="e.g. Cleaned filters and coil, cleared the drain, topped up R32">${esc(j.workNotes||'')}</textarea></label>
-    <label class="field"><span>Parts or gas used (optional)</span><input id="${px}-parts" value="${esc(j.parts||'')}" placeholder="e.g. 0.5 kg R32, 1 capacitor 35µF"></label>
-    <label class="field"><span>Advice for the customer (optional)</span><textarea id="${px}-advice" placeholder="e.g. Clean the filters every 2 weeks. The outdoor unit is rusting at the base.">${esc(r.advice||'')}</textarea></label>
-    <div class="field"><span>Next service</span><div class="chips">${NEXT_MONTHS.map(m=>`<label class="chip-radio"><input type="radio" id="${px}-n${m}" name="${px}-next" value="${m}" ${nm===m?'checked':''}><span>${m} months</span></label>`).join('')}<label class="chip-radio"><input type="radio" id="${px}-n0" name="${px}-next" value="0" ${nm===0?'checked':''}><span>Not needed</span></label></div></div>
-  </div>`;
-}
-function readReportForm(j, px){
-  const g=k=>document.getElementById(`${px}-${k}`)?.value?.trim() ?? '';
-  const n=k=>{ const v=g(k); return v===''? null : +v; };
-  const checks=CHECKS.filter((c,i)=>document.getElementById(`${px}-c${i}`)?.checked);
-  const nextMonths=+(document.querySelector(`input[name="${px}-next"]:checked`)?.value ?? 3);
-  const base=(j.finishedAt||nowISO()).slice(0,10);
-  const readings={gas:g('gas'), psi:n('psi'), amps:n('amps'), ret:n('ret'), sup:n('sup'), volts:n('volts')};
-  return {notes:g('notes'), parts:g('parts'), report:{checks, readings, unitsDone:+g('units')||j.units||1, condition:g('cond')||'good', advice:g('advice'),
-    nextMonths, nextService: nextMonths? addMonths(base, nextMonths) : null, by:ME.user.uid, byName:myName(), savedAt:nowISO()}};
-}
-const dT = rd => rd && rd.ret!=null && rd.sup!=null ? +(rd.ret-rd.sup).toFixed(1) : null;
-function reportDoc(j){
-  const r=j.report||{}, rd=r.readings||{}, C=co(), t=tech(j.techId), d0=dT(rd), cond=CONDITION[r.condition]||CONDITION.good;
-  const row=(l,v)=>v==null||v===''?'':`<tr><td>${l}</td><td><b>${v}</b></td></tr>`;
-  return `<article class="report-doc">
-    <header class="rd-head"><div class="rd-brand">${markSVG()}<div><b>${esc(C.name)}</b><small>${esc(C.address||'')}${C.phone?' · '+esc(C.phone):''}</small></div></div>
-      <div class="rd-title"><h2>Service report</h2><span class="mono">${esc(j.no)}</span><small>${fd(j.finishedAt||r.savedAt)}</small></div></header>
-    <div class="rd-grid"><div><span class="label">Customer</span><b>${esc(j.customerName||'')}</b><small>${esc(addrLine(j))}</small></div>
-      <div><span class="label">Technician</span><b>${esc(t?.name||r.byName||'')}</b><small>${j.arrivedAt?'On site '+ft(j.arrivedAt)+'–'+ft(j.finishedAt):''}</small></div>
-      <div><span class="label">AC</span><b>${esc(r.unitsDone||j.units||1)} × ${esc(j.acType||'AC')}</b><small>${esc(j.btu||'')}</small></div>
-      <div><span class="label">Condition</span><b><span class="pill ${cond[1]}">${cond[0]}</span></b></div></div>
-    ${(r.checks||[]).length?`<h3>Work checklist</h3><ul class="rd-checks">${CHECKS.map(c=>`<li class="${r.checks.includes(c)?'ok':'no'}">${r.checks.includes(c)?'✓':'–'} ${esc(c)}</li>`).join('')}</ul>`:''}
-    ${(rd.psi!=null||rd.amps!=null||d0!=null||rd.volts!=null)?`<h3>Readings</h3><table class="rd-table">
-      ${row('Gas', rd.psi!=null? esc(rd.gas||'') : '')}${row('Suction pressure', rd.psi!=null? `${rd.psi} psig (${(rd.psi/14.5038).toFixed(2)} bar)` : null)}
-      ${row('Return air (room)', rd.ret!=null? rd.ret+' °C':null)}${row('Supply air (outlet)', rd.sup!=null? rd.sup+' °C':null)}
-      ${row('Temperature drop', d0!=null? `${d0} °C ${d0>=8&&d0<=14?'· good':d0<8?'· low':'· high'}` : null)}
-      ${row('Running current', rd.amps!=null? rd.amps+' A':null)}${row('Voltage', rd.volts!=null? rd.volts+' V':null)}</table>`:''}
-    ${j.workNotes?`<h3>Work done</h3><p>${esc(j.workNotes)}</p>`:''}
-    ${j.parts?`<h3>Parts and gas used</h3><p>${esc(j.parts)}</p>`:''}
-    ${r.advice?`<h3>Our advice</h3><p>${esc(r.advice)}</p>`:''}
-    ${r.nextService?`<div class="rd-next"><span class="label">Next service due</span><b>${fd(r.nextService)}</b></div>`:''}
-    <footer class="rd-foot small muted">Thank you for choosing ${esc(C.name)}.</footer></article>`;
-}
-function waNumber(phone){ let d=String(phone||'').replace(/\D/g,''); if(d.length===7) d='960'+d; return d; }
-function waLink(j){
-  const r=j.report||{}, C=co();
-  const text=`${C.name}: service report for ${j.no}\n${fd(j.finishedAt)} · ${r.unitsDone||j.units||1} × ${j.acType||'AC'}\n`+
-    (j.workNotes?`Work done: ${j.workNotes}\n`:'')+(r.advice?`Advice: ${r.advice}\n`:'')+(r.nextService?`Next service due: ${fd(r.nextService)}\n`:'')+
-    `Full report: ${new URL(portalHref('customer',{job:j.id}),location.href).href}`;
-  return `https://wa.me/${waNumber(j.customerPhone)}?text=${encodeURIComponent(text)}`;
-}
-function reportSec(j){
-  const role=ME.role, r=j.report;
-  if(!j.finishedAt) return '';
-  if(role==='customer'){
-    if(!j.reportSentAt) return '';
-    return `<div class="sec"><div class="sec-h"><h3>Service report</h3>${r?.condition?`<span class="pill ${CONDITION[r.condition][1]}">${CONDITION[r.condition][0]}</span>`:''}</div>
-      ${r?.nextService?`<p class="small">Next service due <b>${fd(r.nextService)}</b>.</p>`:''}${r?.advice?`<div class="callout"><span class="label">Our advice</span><p>${esc(r.advice)}</p></div>`:''}
-      <div class="row"><button class="btn primary" data-act="viewReport" data-id="${j.id}">View report</button></div></div>`;
-  }
-  const mine = role==='provider' || j.techId===ME.user.uid;
-  if(!mine) return '';
-  const canEdit = role==='provider' || !j.reportSentAt;
-  return `<div class="sec"><div class="sec-h"><h3>Service report</h3>${j.reportSentAt?`<span class="pill teal">Sent ${fd(j.reportSentAt)}</span>`:r?'<span class="pill mango">Not sent yet</span>':'<span class="pill">Not filled in</span>'}</div>
-    ${r?`<p class="small muted">${(r.checks||[]).length} checks done${dT(r.readings)!=null?' · temperature drop '+dT(r.readings)+' °C':''}${r.nextService?' · next service '+fd(r.nextService):''}</p>`:'<p class="small muted">Add the checklist and readings so the customer gets a full report.</p>'}
-    <div class="row">${r?`<button class="btn" data-act="viewReport" data-id="${j.id}">View</button>`:''}${canEdit?`<button class="btn" data-act="editReport" data-id="${j.id}">${r?'Edit':'Fill in report'}</button>`:''}
-      ${r?`<button class="btn ${j.reportSentAt?'':'primary'}" data-act="sendReport" data-id="${j.id}">${j.reportSentAt?'Send again':'Send to customer'}</button>`:''}
-      ${r?`<button class="btn wa" data-act="reportShare" data-fmt="pdf" data-id="${j.id}">Send PDF</button>`:''}</div></div>`;
-}
-function printReport(){
-  document.body.classList.add('print-report');
-  const done=()=>document.body.classList.remove('print-report');
-  if(window.AndroidApp?.print){ try{ window.AndroidApp.print(document.title); }catch(e){} setTimeout(done, 1500); return; }
-  window.addEventListener('afterprint', done, {once:true}); window.print(); setTimeout(done, 60000);
-}
-
-/* The technician didn't tap "Mark job finished" in the app: the office settles it, with the same report. */
-function officeFinishSec(j){
-  if(ME.role!=='provider' || j.finishedAt || j.cancelled || j.direct) return '';
-  if(!(j.techId || j.departedAt || j.quote?.status==='accepted' || j.slot)) return '';
-  return `<details class="sec office-finish"${j.departedAt?' open':''}><summary><b>Job done but not marked in the technician app?</b> <span class="small muted">Finish it for them</span></summary>
-    <p class="small muted">Records it as done now, stops the technician's location sharing, and tells the customer. Add what was done if you know it.</p>
-    ${reportForm(j, 'of-'+j.id)}
-    <div class="row"><button class="btn teal" data-act="officeFinish" data-id="${j.id}">Mark job done</button></div></details>`;
-}
-/* ---------- invoice & payment ---------- */
-// Technicians only see whether the invoice is raised and whether it's paid, never an amount.
-/* ---------- send a link or message by WhatsApp, Viber or anything else ---------- */
-const customerLink = () => new URL(portalHref('customer'), location.href).href;
-function inviteText(cu, login){
-  const C=co();
-  return `Hello ${cu?.name||''}, welcome to ${C.name}!\nBook your AC service, follow your technician on the map, and see your quotations, invoices and service reports here:\n${customerLink()}`
-    + (login?.email ? `\n\nYour login\nEmail: ${login.email}${login.password?`\nPassword: ${login.password}`:''}` : '')
-    + (C.phone ? `\n\nQuestions? Call ${C.phone}.` : '');
-}
-function shareButtons(text, phone){
-  const wa = `https://wa.me/${phone?waNumber(phone):''}?text=${encodeURIComponent(text)}`;
-  return `<div class="share-btns"><a class="btn wa" target="_blank" rel="noopener" href="${wa}">WhatsApp</a>
-    <a class="btn viber" href="viber://forward?text=${encodeURIComponent(text)}">Viber</a>
-    <button class="btn" data-act="copyText" data-text="${esc(text)}">Copy</button>
-    ${navigator.share?`<button class="btn" data-act="shareText" data-text="${esc(text)}">More…</button>`:''}</div>`;
-}
-/** Window with the message (editable) and the buttons; used after adding a customer and from Customers. */
-function shareModal(title, text, phone){
-  UI.modal={title, html:`<label class="field"><span>Message</span><textarea id="share-text" rows="8" data-np>${esc(text)}</textarea></label>
-    <p class="small muted">${phone?`To ${esc(phone)}. `:''}Edit the message if you like, then choose how to send it.</p>
-    <div id="share-box">${shareButtons(text, phone)}</div>`, phone};
-  render();
-}
-document.addEventListener('input', e=>{ if(e.target.id!=='share-text') return;
-  const box=document.getElementById('share-box'); if(box) box.innerHTML=shareButtons(e.target.value, UI.modal?.phone); });
-
-/* ---------- PDF and image files of quotations, invoices and service reports ----------
-   Made on the device (html2canvas + jsPDF, loaded only when needed), then saved or handed to the
-   phone's share screen so it can go to WhatsApp as a real PDF or photo. The Android apps do the
-   sharing natively (AndroidApp.shareFile / saveFile) because Android's web view can't share files. */
-const PDF_LIBS=['https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js','https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'];
-let pdfLibsP=null, READY=null;
-function loadScript(src){ return new Promise((res,rej)=>{ const el=document.createElement('script'); el.src=src; el.crossOrigin='anonymous'; el.onload=res; el.onerror=()=>rej(new Error("Couldn't load the PDF maker. Check your internet connection.")); document.head.appendChild(el); }); }
-function pdfLibs(){ return pdfLibsP || (pdfLibsP=PDF_LIBS.reduce((p,u)=>p.then(()=>loadScript(u)), Promise.resolve()).catch(e=>{ pdfLibsP=null; throw e; })); }
-async function renderDoc(html){
-  await pdfLibs();
-  const box=document.createElement('div'); box.className='capture'; box.innerHTML=html; document.body.appendChild(box);
-  try{
-    try{ await document.fonts?.ready; }catch(e){}
-    await Promise.all([...box.querySelectorAll('img')].map(i=>i.complete?0:new Promise(r=>{ i.onload=i.onerror=r; })));
-    const w=box.offsetWidth, h=box.offsetHeight;
-    // Render the copy at the top-left of html2canvas's own sandbox (off-screen elements can come out blank).
-    return await window.html2canvas(box,{scale:2, backgroundColor:'#ffffff', useCORS:true, logging:false,
-      x:0, y:0, width:w, height:h, scrollX:0, scrollY:0, windowWidth:Math.max(w+40, 820), windowHeight:Math.max(h, 800),
-      onclone:(doc)=>{ const c=doc.querySelector('.capture'); if(c){ c.style.left='0px'; c.style.top='0px'; } }});
-  } finally { box.remove(); }
-}
-function canvasToPdf(cv){
-  const pdf=new window.jspdf.jsPDF({unit:'pt', format:'a4'});
-  const W=pdf.internal.pageSize.getWidth(), H=pdf.internal.pageSize.getHeight(), m=28, w=W-2*m, slice=Math.floor((H-2*m)*cv.width/w);
-  for(let y=0,i=0; y<cv.height; y+=slice,i++){
-    const h=Math.min(slice, cv.height-y), part=document.createElement('canvas'); part.width=cv.width; part.height=h;
-    const g=part.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,part.width,h); g.drawImage(cv,0,y,cv.width,h,0,0,cv.width,h);
-    if(i) pdf.addPage(); pdf.addImage(part.toDataURL('image/jpeg',0.92),'JPEG',m,m,w,h*w/cv.width);
-  }
-  return pdf.output('blob');
-}
-const toBase64 = blob => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result).split(',')[1]); r.onerror=rej; r.readAsDataURL(blob); });
-function download(blob, name){ const u=URL.createObjectURL(blob), a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u), 60000); }
-const withTimeout = (p, ms, msg) => Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error(msg)), ms))]);
-// Android's web view can't download files: the app saves them itself (AndroidApp.saveFile). An app built
-// before that existed only has print, which can also save a PDF.
-const WEBVIEW = IN_APP || /; wv\)/.test(navigator.userAgent);
-const oldApp = () => WEBVIEW && !window.AndroidApp?.saveFile;
-function printFallback(html, title){
-  UI.modal={title, wide:true, html:html+`<p class="small muted no-print" style="margin-top:12px">In the print screen choose <b>Save as PDF</b>.${IN_APP?' Update the app (rebuild it) to save and send PDFs directly.':''}</p>`}; render();
-  setTimeout(()=>printReport(), 300);
-}
-async function makeFile(html, name, fmt){
-  const cv=await withTimeout(renderDoc(html), 30000, "Making the file took too long. Check your internet connection and try again.");
-  const blob = fmt==='pdf' ? canvasToPdf(cv) : await new Promise(r=>cv.toBlob(r,'image/jpeg',0.92));
-  const file = name.replace(/[^\w.-]+/g,'-') + (fmt==='pdf'?'.pdf':'.jpg');
-  return {blob, file, mime: fmt==='pdf'?'application/pdf':'image/jpeg'};
-}
-/** jsPDF on its own, for reports drawn as real text (crisp, small and searchable). */
-async function jsPdfLib(){ if(!window.jspdf) await withTimeout(loadScript(PDF_LIBS[1]), 30000, "Couldn't load the PDF maker. Check your internet connection."); return window.jspdf.jsPDF; }
-/** Save any finished file (PDF, Excel…) on this device: the Android app saves it to Downloads itself. */
-async function saveBlob(blob, file, mime){
-  if(window.AndroidApp?.saveFile){ window.AndroidApp.saveFile(await toBase64(blob), mime, file); return; }
-  if(oldApp()) return toast('Update the app (rebuild it) to save files. Or open the office portal in a browser.');
-  download(blob, file); afterDownload({blob, file, mime});
-}
-/** Save a PDF on this device. */
-async function saveDocFile(html, name){
-  if(oldApp()) return printFallback(html, name.replace(/-/g,' '));
-  toast('Making the PDF…');
-  const f=await makeFile(html, name, 'pdf');
-  if(window.AndroidApp?.saveFile){ window.AndroidApp.saveFile(await toBase64(f.blob), f.mime, f.file); return; }
-  download(f.blob, f.file); afterDownload(f);
-}
-// Some browsers (and apps that open links inside themselves) block downloads: offer to open the file instead.
-function afterDownload(f){
-  const u=URL.createObjectURL(f.blob);
-  UI.modal={title:'Saved', html:`<p><b>${esc(f.file)}</b> was saved to your downloads.</p><p class="small muted">Not there? Open it, then use your browser's Share or Save.</p>
-    <div class="row"><a class="btn primary" href="${u}" target="_blank" rel="noopener"${/sheet/.test(f.mime)?` download="${esc(f.file)}"`:''}>Open ${f.mime==='application/pdf'?'PDF':/^image/.test(f.mime)?'image':'file'}</a><button class="btn" data-act="modalClose">Done</button></div>`}; render();
-}
-/** Send a PDF or photo: the phone's share screen (pick WhatsApp), or on a computer: save it, then open WhatsApp. */
-async function shareDocFile(html, name, fmt, text, phone){
-  if(oldApp()) return printFallback(html, name.replace(/-/g,' '));
-  toast(fmt==='pdf'?'Making the PDF…':'Making the image…');
-  const f=await makeFile(html, name, fmt);
-  if(window.AndroidApp?.shareFile){ window.AndroidApp.shareFile(await toBase64(f.blob), f.mime, f.file, text||''); return; }
-  const file=new File([f.blob], f.file, {type:f.mime});
-  if(navigator.canShare?.({files:[file]})){
-    try{ await navigator.share({files:[file], text}); }
-    catch(e){
-      if(e.name==='AbortError') return;
-      // Making the file took too long for the browser to allow sharing: one more tap shares it.
-      READY={file, text}; UI.modal={title:'Ready to send', html:`<p>${esc(f.file)} is ready.</p><div class="row"><button class="btn primary" data-act="shareReady">Share now</button></div>`}; render();
-    }
-    return;
-  }
-  download(f.blob, f.file);
-  if(phone){ window.open(`https://wa.me/${waNumber(phone)}?text=${encodeURIComponent(text||'')}`, '_blank', 'noopener'); toast('Saved. In WhatsApp, tap 📎 and attach '+f.file+'.'); }
-  else toast('Saved '+f.file+'. Attach it in WhatsApp.');
-}
-function docText(kind, D, j){ const C=co(); return `${C.name}: ${kind.toLowerCase()} ${D.no} for ${j.customerName||''}, total ${money(totals(D).total)}.`; }
-function docActions(kind, D, j){
-  const office = ME.role!=='customer';
-  return `<div class="row doc-acts no-print"><button class="btn sm" data-act="docSave" data-kind="${kind}" data-id="${j.id}">⤓ Save PDF</button>
-    <button class="btn sm ${office?'wa':''}" data-act="docShare" data-fmt="pdf" data-kind="${kind}" data-id="${j.id}">${office?'Send PDF':'Share PDF'}</button>
-    ${office?`<button class="btn sm wa" data-act="docShare" data-fmt="img" data-kind="${kind}" data-id="${j.id}">Send as photo</button>`:''}
-    <button class="btn sm" data-act="printDoc" data-kind="${kind}" data-id="${j.id}">View / print</button></div>`;
-}
-function docWaLink(kind, D, j){
-  const C=co(), t=totals(D), paid=kind==='Invoice' && j.payment?.status==='paid';
-  const text=`${C.name}\n${kind} ${D.no} for ${j.customerName||''}\n`+(D.lines||[]).map(l=>`• ${l.desc} × ${l.qty}: ${money((+l.qty||0)*(+l.rate||0))}`).join('\n')+
-    `\n${t.disc?'Discount: -'+money(t.disc)+'\n':''}GST ${t.rate}%: ${money(t.gst)}\nTotal: ${money(t.total)}`+
-    (kind==='Invoice'? (paid?`\nPAID ${fd(j.payment.paidAt)}. Thank you!`:`\nDue ${fd(D.dueDate)}.${(D.methods||[]).includes('bml')&&C.bml?' BML '+C.bml+'.':''}${(D.methods||[]).includes('mib')&&C.mib?' MIB '+C.mib+'.':''} Reference ${D.no}.`) : `\nValid until ${fd(D.validUntil)}. Reply to accept.`);
-  return `https://wa.me/${waNumber(j.customerPhone)}?text=${encodeURIComponent(text)}`;
-}
-// Customers see the total and open the full document only if they want it.
-function docFold(kind, D, j, open){
-  return `<details class="doc-fold"${open?' open':''}><summary><span>${kind} <span class="mono">${esc(D.no||'')}</span><small>${open?'Tap to hide':'Tap to see the full '+kind.toLowerCase()}</small></span><b>${money(totals(D).total)}</b></summary>${docView(kind,D,j)}${docActions(kind,D,j)}</details>`;
-}
-function techInvoiceSec(j){
-  const I=j.invoice, P=j.payment;
-  if(!I) return j.finishedAt? `<div class="sec"><div class="sec-h"><h3>Invoice</h3><span class="pill">Not raised yet</span></div><p class="small muted">The office raises the invoice after the job.</p></div>` : '';
-  const paid=P?.status==='paid';
-  return `<div class="sec"><div class="sec-h"><h3>Invoice</h3><span class="pill ${paid?'teal':P?.status==='pending'?'coral':'lagoon'}">${paid?'Paid':P?.status==='pending'?'To collect':'Invoice raised'}</span></div>
-    <p class="small">${paid?`Paid ${fdt(P.paidAt)}.`:P?.status==='pending'?`The customer will pay by ${esc(METHODS[P.method]?.n.toLowerCase()||'cash')} on site. Collect it and hand it to the office.`:`Invoice raised ${fdt(I.issuedAt)}. Waiting for the customer to pay.`}</p></div>`;
-}
-function invoiceSec(j){
-  const role=ME.role, I=j.invoice, P=j.payment, C=co();
-  if(role==='technician') return techInvoiceSec(j);
-  if(!I && role!=='provider') return j.finishedAt? `<div class="sec"><h3>Invoice</h3><p class="muted">The invoice will appear here once the office sends it.</p></div>` : '';
-  if(!I && !j.finishedAt && !j.direct) return '';
-  let h=`<div class="sec"><div class="sec-h"><h3>Invoice</h3>${I?pill(j):''}</div>`;
-  if(!I){
-    const key='i-'+j.id;
-    const base=j.quote? clone(j.quote.lines) : (j.serviceIds||[]).map(sv).filter(Boolean).map(s=>({desc:s.name,qty:j.units||1,rate:s.price}));
-    const init={lines:base, discount:j.quote?.discount||0, notes:'Thank you for your business. Please use the invoice number as the payment reference.', dueDays:C.terms||7, methods:{...C.methods}};
-    h+=`<div class="callout">${lineEditor(key,init)}
-      <div class="grid2"><label class="field"><span>Due in (days)</span><input id="${key}-due" data-np data-ed="${key}" data-f="dueDays" type="number" min="0" value="${esc(UI.ed[key].dueDays)}"></label></div>
-      <div class="field"><span>Payment methods the customer can use</span><div class="row">${Object.entries(METHODS).map(([k,m])=>`<label class="row small" style="gap:6px"><input type="checkbox" id="${key}-m-${k}" data-np data-ed="${key}" data-f="methods.${k}" ${UI.ed[key].methods[k]?'checked':''}>${m.n}</label>`).join('')}</div></div>
-      <label class="field"><span>Notes</span><textarea id="${key}-notes" data-np data-ed="${key}" data-f="notes">${esc(UI.ed[key].notes)}</textarea></label>
-      <div class="row"><button class="btn primary" data-act="sendInvoice" data-id="${j.id}">Send invoice</button><span class="small muted">Sending posts the sale, GST and the amount owed to Accounting.</span></div></div>`;
-    return h+`</div>`;
-  }
-  h+= role==='customer' ? docFold('Invoice',I,j,false) : docView('Invoice',I,j)+docActions('Invoice',I,j);
-  if(P?.status==='paid'){
-    h+=`<div class="callout teal"><b>Paid ${money(P.amount)} by ${METHODS[P.method]?.n||P.method}</b><p class="small">${fdt(P.paidAt)}${P.ref?' · Reference '+esc(P.ref):''}</p>`;
-    h+=receiptLine(j);
-    if(role==='provider' && P.verified===false) h+=`<p class="small"><b>Check this ${P.ref?'reference':'receipt'} against your ${P.method==='bml'?'BML':'MIB'} account.</b> It's already posted to the books; reverse it if the money didn't arrive.</p>
-      <div class="row"><button class="btn teal sm" data-act="verifyPay" data-id="${j.id}">Transfer received</button><button class="btn danger sm ${UI.confirm==='rev'+j.id?'armed':''}" data-act="reversePay" data-id="${j.id}">${UI.confirm==='rev'+j.id?'Tap again to reverse':'Not received, reverse it'}</button></div>`;
-    h+=`</div>`;
-  } else if(P?.status==='pending'){
-    h+=`<div class="callout coral"><b>${METHODS[P.method]?.n} payment of ${money(I.total)} to collect</b><p class="small">The customer chose this ${fdt(P.requestedAt)}.</p>${receiptLine(j)}${role==='provider'?`<div class="row"><button class="btn coral" data-act="confirmPay" data-id="${j.id}">Confirm ${METHODS[P.method]?.n.toLowerCase()} received</button></div>`:''}</div>`;
-  } else if(role==='customer') h+=payPanel(j);
-  if(role==='customer' && P && !j.receipt) h+=`<div class="callout"><b>Add your payment receipt</b><p class="small">Optional. It helps the office confirm your payment faster.</p>${receiptPicker(j)}${UI.rcpt[j.id]?`<div><button class="btn teal" data-act="uploadReceipt" data-id="${j.id}">Send receipt</button></div>`:''}</div>`;
-  else if(role==='provider') h+=`<details class="callout"><summary><b>Record payment received</b> <span class="small muted">(cash, bank transfer or card: posts to Accounting)</span></summary>
-      <div class="grid3" style="margin-top:10px"><label class="field"><span>Method</span><select id="rp-m-${j.id}">${Object.entries(METHODS).map(([k,m])=>`<option value="${k}">${m.n}</option>`).join('')}</select></label>
-      <label class="field"><span>Reference</span><input id="rp-r-${j.id}" placeholder="Transfer or receipt no."></label></div>
-      <div class="row" style="margin-top:10px"><button class="btn" data-act="recordPay" data-id="${j.id}">Record ${money(I.total)} received</button></div></details>`;
-  if(role==='provider') h+=`<div class="row del-row"><button class="btn sm danger ${UI.confirm==='delinv'+j.id?'armed':''}" data-act="delInvoice" data-id="${j.id}">${UI.confirm==='delinv'+j.id?'Tap again: delete invoice'+(P?.status==='paid'?' and its payment':'')+' and their accounting entries':'Delete invoice'}</button></div>`;
-  return h+`</div>`;
-}
-function payPanel(j){
-  const I=j.invoice, C=co(), ms=(I.methods||[]).filter(m=>METHODS[m]);
-  if(!ms.length) return `<p class="muted">Contact the office to arrange payment.</p>`;
-  const sel=UI.payM[j.id] || ms[0], acct = sel==='bml'? C.bml : C.mib;
-  return `<div class="pay">
-    <div class="pay-amt"><span class="label">Amount to pay</span><b>${money(I.total)}</b><span class="small">Due ${fd(I.dueDate)}${overdue(j)?' · overdue':''}</span></div>
-    <div class="pay-step"><span class="pay-n">1</span><div class="stack" style="flex:1;min-width:0"><b>Choose how to pay</b><div class="opts">${ms.map((m,i)=>`<label class="opt"><input type="radio" name="pm-${j.id}" id="pm-${j.id}-${m}" data-np value="${m}" data-change="payMethod" data-id="${j.id}" ${m===sel?'checked':''}><span class="sicon c${i%5}"><svg viewBox="0 0 24 24">${m==='cash'?'<rect x="3" y="7" width="18" height="10" rx="2"/><circle cx="12" cy="12" r="2.5"/>':m==='card'?'<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M3 10h18"/>':'<path d="M4 10h16L12 4zM6 10v8M10 10v8M14 10v8M18 10v8M4 20h16"/>'}</svg></span><span><b>${METHODS[m].n}</b><span class="small muted">${m==='cash'?'Pay the technician or the office':m==='card'?"On the technician's card machine":(m==='bml'?C.bml:C.mib)?'Account '+esc(m==='bml'?C.bml:C.mib):'Bank transfer'}</span></span></label>`).join('')}</div>
-    </div></div>
-    ${METHODS[sel].transfer?`
-    <div class="pay-step"><span class="pay-n">2</span><div class="stack" style="flex:1;min-width:0"><b>Transfer the money</b>
-      <div class="bankbox">
-        <div><span class="label">Bank</span><b>${sel==='bml'?'Bank of Maldives (BML)':'Maldives Islamic Bank (MIB)'}</b></div>
-        <div><span class="label">Account name</span><b>${esc(C.name)}</b></div>
-        <div><span class="label">Account number</span><span class="row"><b class="mono">${esc(acct||'Ask the office')}</b>${acct?copyBtn(acct):''}</span></div>
-        <div><span class="label">Amount</span><span class="row"><b>${money(I.total)}</b>${copyBtn((+I.total).toFixed(2))}</span></div>
-        <div><span class="label">Reference</span><span class="row"><b class="mono">${esc(j.invoice?.no||j.no)}</b>${copyBtn(j.invoice?.no||j.no)}</span></div>
-      </div></div></div>
-    <div class="pay-step"><span class="pay-n">3</span><div class="stack" style="flex:1;min-width:0"><b>Show us you've paid</b>
-      <label class="field"><span>Transfer reference from your bank app</span><input id="pr-${j.id}" placeholder="e.g. BLAZ2610271234"></label>
-      ${receiptPicker(j)}
-      <p class="small muted">Add the reference, the receipt, or both.</p></div></div>`
-    :`<p class="small">${sel==='cash'?`Pay ${money(I.total)} in cash to the technician or at our office.`:`Pay ${money(I.total)} on the technician's card machine.`} The office confirms it once the money is received.</p>`}
-    <button class="btn teal block lg" data-act="pay" data-id="${j.id}" data-m="${sel}">${METHODS[sel].transfer?'Send payment details':`I'll pay ${sel==='cash'?'cash':'by card'}`}</button></div>`;
-}
-
-/* ---------- rating & messages ---------- */
-function ratingSec(j){
-  const R=j.rating;
-  if(R) return `<div class="sec"><h3>Customer rating</h3><div class="row">${stars(R.stars)}<span class="small muted">${fdt(R.at)}</span></div>${R.text?`<p>“${esc(R.text)}”</p>`:''}</div>`;
-  if(ME.role==='customer' && j.finishedAt) return `<div class="sec"><h3>How did we do?</h3>
-    <div class="starpick" role="radiogroup" aria-label="Rating">${[5,4,3,2,1].map(n=>`<input type="radio" name="rt-${j.id}" id="rt-${j.id}-${n}" value="${n}"><label for="rt-${j.id}-${n}" title="${n} star${n>1?'s':''}">★</label>`).join('')}</div>
-    <label class="field"><span>Feedback (optional)</span><textarea id="rf-${j.id}" placeholder="Was the technician on time? Is the AC cooling well now?"></textarea></label>
-    <div class="row"><button class="btn mango" data-act="rate" data-id="${j.id}">Submit rating</button></div></div>`;
-  return '';
-}
-const HAS_AMOUNT = t => new RegExp(`\\b${CUR}\\b|\\d[\\d,]*\\.\\d{2}\\b`).test(t||'');
-function messagesSec(j){
-  const ms=(S.msgs[j.id]||[]).filter(m=>!(ME.role==='technician' && m.kind==='sys' && HAS_AMOUNT(m.text)));
-  return `<div class="sec"><h3>Activity and messages</h3>
-    <div class="thread" data-keep-scroll="th-${j.id}">${ms.length? ms.map(m=>m.kind==='sys'?`<div class="sys">${esc(m.text)} · ${fdt(m.at)}</div>`
-      :`<div class="msg r-${esc(m.role)} ${m.uid===ME.user.uid?'mine':''}"><span class="who">${esc(m.name)} · ${m.role==='provider'?'Office':m.role==='technician'?'Technician':'Customer'} · ${fdt(m.at)}</span><p>${esc(m.text)}</p></div>`).join('') : '<p class="muted small">No messages yet.</p>'}</div>
-    ${j.cancelled?'':`<div class="row" style="align-items:flex-end;flex-wrap:nowrap"><label class="field" style="flex:1"><span>Message</span><textarea id="msg-${j.id}" rows="2" style="min-height:44px" placeholder="Write a message"></textarea></label><button class="btn primary" data-act="sendMsg" data-id="${j.id}">Send</button></div>`}</div>`;
-}
-/* ---------- actions ---------- */
-const val = id => document.getElementById(id)?.value?.trim() ?? '';
-const jobRef = id => d('jobs',id);
-const ACT = {
-  authMode(el){ UI.authMode=el.dataset.v; render(); },
-  async google(){ await run(()=>A.signInWithPopup(auth, new A.GoogleAuthProvider())); },
-  async verifySend(){ try{ await A.sendEmailVerification(ME.user); toast('Verification email sent'); }catch(e){ toast(errMsg(e)); } },
-  async verifiedContinue(){ try{ await ME.user.reload(); await ME.user.getIdToken(true); ME.user=auth.currentUser; }catch(e){}
-    if(!auth.currentUser?.emailVerified) return toast("Your email isn't verified yet. Open the link in the email we sent.");
-    ME.user=auth.currentUser; render(); },
-  async guestStart(el){ if(el) el.disabled=true; UI.creating=true; render();
-    const ok=await run(async()=>{
-      const u=ME.user?.isAnonymous ? ME.user : (await A.signInAnonymously(auth)).user;
-      ME.user=u;
-      if(!(await F.getDoc(d('users',u.uid))).exists()){
-        const b=F.writeBatch(db), at=nowISO();
-        b.set(d('users',u.uid), {name:'', email:'', phone:'', role:'customer', status:'active', guest:true, createdAt:at});
-        b.set(d('customers',u.uid), {name:'', phone:'', email:'', island:'', address:'', hasLogin:true, guest:true, createdAt:at});
-        await b.commit();
-      }
-      UI.ctab='book'; UI.bk=null; UI.sel=''; saveUI();
-    });
-    UI.creating=false; if(!ok) UI.authMode='signup'; render(); },
-  /** A guest keeps everything: the guest login gets an email and password (same account, same requests). */
-  async upgradeGuest(){
-    const email=val('ug-email').toLowerCase(), pass=document.getElementById('ug-pass')?.value||'', name=val('ug-name'), phone=val('ug-phone');
-    if(!name || !phone) return toast('Enter your name and mobile number.');
-    if(!email || pass.length<6) return toast('Enter your email and a password of at least 6 characters.');
-    await run(async()=>{
-      await A.linkWithCredential(ME.user, A.EmailAuthProvider.credential(email, pass));
-      await ME.user.getIdToken(true); ME.user=auth.currentUser;
-      const b=F.writeBatch(db);
-      b.update(d('users',ME.user.uid), {email, name, phone, guest:false});
-      b.set(d('customers',ME.user.uid), {email, name, phone, guest:false}, {merge:true});
-      await b.commit(); UI.upgrade=false;
-    }, 'Account created. Your services are saved to it.');
-    render(); },
-  upgradeOpen(){ UI.upgrade=true; UI.ctab='profile'; UI.sel=''; render(); scrollTo(0,0); },
-  async signOut(){
-    if(ME.user?.isAnonymous && UI.confirm!=='guestOut'){ UI.confirm='guestOut'; render(); return toast("You're a guest: signing out removes your requests from this device. Create an account first to keep them, or tap Sign out again."); }
-    UI.confirm=''; UI.authMode=PORTAL==='customer'?'welcome':'signin';
-    stopGPS(); clearTimeout(shellT); clearDeviceCopies();
-    if(PUSH_TOKEN && ME.user){ try{ await F.updateDoc(d('users',ME.user.uid),{fcmTokens:F.arrayRemove(PUSH_TOKEN)}); }catch(e){} PUSH_TOKEN=null; }
-    pushTried=null; await A.signOut(auth); },
-  bell(){ UI.bell=!UI.bell; render(); },
-  bellClose(){ UI.bell=false; render(); },
-  modalClose(){ UI.modal=null; render(); },
-  openItem(el){ const it=(S.inbox||[]).find(x=>x.id===el.dataset.id); UI.bell=false;
-    if(it && !it.read) F.updateDoc(d('inbox',inboxId(),'items',it.id),{read:true}).catch(()=>{});
-    if(it?.chat) openChat(it.chat, it.jobId); else if(it?.jobId && job(it.jobId)) openJobById(it.jobId); render(); },
-  openChat(el){ openChat(ME.role==='technician' ? ME.user.uid : el.dataset.id, el.dataset.job); saveUI(); render(); },
-  closeChat(){ if(PORTAL==='admin') UI.chatTech=''; else UI.tview='jobs'; render(); },
-  chatOpenJob(el){ const id=el.dataset.id; if(!job(id)) return toast("That job isn't in your list any more.");
-    if(PORTAL==='technician') UI.tview='jobs'; openJobById(id); render(); },
-  chatSend(){ const id=openChatId(), ta=document.getElementById('chat-text'), text=(ta?.value||'').trim(); if(!id || !text) return;
-    const jid=document.getElementById('chat-job')?.value||'', j=jid?job(jid):null, at=nowISO();
-    const name = ME.role==='provider' ? (ME.profile?.name||'Office') : myName();
-    const msg={uid:ME.user.uid, role:ME.role, name, text, at, ...(j?{jobId:j.id, jobNo:j.no||''}:{})};
-    ta.value=''; UI.chatJob='';
-    run(async()=>{
-      await F.addDoc(c('chats',id,'messages'), msg);
-      await F.setDoc(d('chats',id), {lastAt:at, lastText:text.slice(0,140), lastRole:ME.role, lastName:name, [ME.role==='provider'?'readOffice':'readTech']:at}, {merge:true});
-      const rid = ME.role==='provider' ? id : 'office';
-      await F.addDoc(c('inbox',rid,'items'), {title:`Message from ${name}${ME.role==='provider'?' (office)':''}`, body:`${j?j.no+' · ':''}${text.slice(0,300)}`, chat:id, jobId:j?.id||'', jobNo:j?.no||'',
-        at, read:false, from:ME.user.uid, fromName:name, portal:ME.role==='provider'?'technician':'admin'}).catch(e=>console.warn('chat notify',e));
-    }); },
-  readAll(){ const b=F.writeBatch(db); (S.inbox||[]).filter(x=>!x.read).forEach(x=>b.update(d('inbox',inboxId(),'items',x.id),{read:true})); b.commit().catch(e=>toast(errMsg(e))); },
-  iosHide(){ try{ localStorage.setItem('acsp-ios-hide', CO); }catch(e){} render(); },
-  async enablePush(){
-    if(window.AndroidApp?.requestPushToken){ pushTried=null; window.AndroidApp.requestPushToken(); toast('Allow notifications when your phone asks'); setTimeout(render, 1500); return; }
-    try{ const p=await Notification.requestPermission(); if(p!=='granted'){ toast(IS_IOS?'Notifications were not allowed. Turn them on in Settings → Notifications → '+brandName()+'.':'Alerts were not allowed on this device.'); return render(); }
-      await registerSW(); pushTried=null; await registerPush();
-      if(IS_IOS && !PUSH_TOKEN) toast(SETTINGS.vapidKey?"Notifications are allowed, but this iPhone couldn't register for them. Close the app fully, open it again and retry.":"Notifications are allowed, but push isn't set up for this site yet (vapidKey in firebase-config.js).");
-      else toast('Alerts are on for this device'); render(); }
-    catch(e){ toast('This browser cannot show alerts.'); } },
-  async copy(el){ const v=el.dataset.v; try{ await navigator.clipboard.writeText(v); toast('Copied: '+v); }catch(e){ toast(v); } },
-  rcptRemove(el){ delete UI.rcpt[el.dataset.id]; render(); },
-  async viewReceipt(el){ const id=el.dataset.id; UI.modal={title:'Payment receipt', html:'<div class="loading">Loading the receipt…</div>'}; render();
-    try{ const s=await F.getDoc(d('jobs',id,'files','receipt')); if(!s.exists()) throw new Error('The receipt was not found.');
-      const r=s.data(); let body;
-      if(r.type==='application/pdf'){ const u=URL.createObjectURL(await (await fetch(r.dataUrl)).blob()); body=`<p><a class="btn primary" href="${u}" target="_blank" rel="noopener">Open the PDF</a></p><embed class="rcpt-pdf" src="${u}" type="application/pdf">`; }
-      else body=`<img class="rcpt-full" src="${esc(r.dataUrl)}" alt="Payment receipt">`;
-      UI.modal={title:'Payment receipt', html:body+`<p class="small muted">${esc(r.name)} · uploaded ${fdt(r.at)}</p>`};
-    }catch(e){ UI.modal={title:'Payment receipt', html:`<p>${esc(errMsg(e))}</p>`}; }
-    render(); },
-  uploadReceipt(el){ const j=job(el.dataset.id), r=UI.rcpt[j.id]; if(!r) return toast('Choose a receipt file first.');
+export const inventoryActions = {
+  invOpen(el){ const mode=el.dataset.mode, id=el.dataset.id||'';
+    if(mode==='buy' && UI.inv?.mode!=='buy') UI.buy=null;
+    if(mode==='buy' && UI.inv?.mode==='buy' && id){ const B=buyState(); if(!B.lines.some(l=>l.itemId===id)){ const it=item(id), e=B.lines.find(l=>!l.itemId); if(e){ e.itemId=id; e.cost=+it.lastCost||+it.cost||0; } else B.lines.push({itemId:id, qty:1, cost:+it.lastCost||+it.cost||0}); } }
+    if(mode==='adjust') UI.adj=null;
+    UI.inv={mode, id, back:el.dataset.back||''}; UI.confirm=''; render(); scrollTo({top:0, behavior:'smooth'}); },
+  invClose(){ if(UI.inv?.back==='buy'){ UI.inv={mode:'buy'}; return render(); } closeForm(); },
+  invFilter(el){ UI.invf=el.dataset.v; render(); },
+  buyAdd(){ buyState().lines.push({itemId:'', qty:1, cost:0}); render(); },
+  buyRm(el){ const B=buyState(); B.lines.splice(+el.dataset.i,1); if(!B.lines.length) B.lines.push({itemId:'',qty:1,cost:0}); render(); },
+  buySave(el){ const B=buyState(), lines=B.lines.filter(l=>l.itemId && +l.qty>0);
+    if(!lines.length) return toast('Choose at least one item and its quantity.');
+    if(!B.date) return toast('Choose the date.');
+    const ids=[...new Set(lines.map(l=>l.itemId))], billId=newId('stock'), at=nowISO(), total=r2(lines.reduce((a,l)=>a+(+l.qty)*(+l.cost||0),0));
     el.disabled=true;
-    run(async()=>{ const b=F.writeBatch(db), at=nowISO();
-      b.set(d('jobs',j.id,'files','receipt'),{...r, at, uid:ME.user.uid}); b.update(jobRef(j.id),{receipt:{name:r.name, type:r.type, at}});
-      await b.commit(); delete UI.rcpt[j.id]; await event(j,'Payment receipt uploaded',['office'],'Payment receipt uploaded'); }, 'Receipt sent to the office').finally(()=>el.disabled=false); },
-  openJob(el){ UI.sel=el.dataset.id; UI.confirm=''; render(); if(innerWidth<=900) scrollTo(0,0); },
-  closeJob(){ UI.sel=''; render(); },
-  addLine(el){ UI.ed[el.dataset.key].lines.push({desc:'',qty:1,rate:0}); render(); },
-  rmLine(el){ UI.ed[el.dataset.key].lines.splice(+el.dataset.i,1); render(); },
-  reviseQuote(el){ UI.confirm='rev'+el.dataset.id; delete UI.ed['q-'+el.dataset.id]; render(); },
-  async locate(el){ const k=el.dataset.key; toast('Finding your location…'); const p=await getPosOnce();
-    if(!p) return toast('Could not get your location. Allow location access, or tap the map instead.');
-    UI.pick[k]={lat:p.lat,lng:p.lng}; const m=MAPS['pick-'+k]; if(m){ m.map.setView([p.lat,p.lng],17); updateMap('pick-'+k,m); } },
-
-  schedule(el){ const j=job(el.dataset.id), date=val('sd-'+j.id), time=val('st-'+j.id), note=val('sm-'+j.id);
-    if(!date||!time) return toast('Choose a date and time first.');
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{slot:{date,time}});
-      await event(j,`${j.slot?'Appointment moved to':'Appointment confirmed for'} ${slotText({date,time})}${note?'. '+note:''}`,['customer','tech'], j.slot?'Appointment changed':'Appointment confirmed');
-      if(note){ await F.addDoc(c('jobs',j.id,'messages'),msgObj(note)); const t=document.getElementById('sm-'+j.id); if(t) t.value=''; } }, 'Appointment sent to the customer'); },
-
-  sendQuote(el){ const j=job(el.dataset.id), key='q-'+j.id, e=UI.ed[key];
-    const lines=e.lines.filter(l=>String(l.desc).trim()).map(l=>({desc:String(l.desc).trim(),qty:+l.qty||0,rate:r2(l.rate)}));
-    if(!lines.length) return toast('Add at least one line to the quotation.');
-    run(async()=>{ const no=j.quote?.no || `Q-${today().slice(0,4)}-${pad(await nextNumber('quotes'))}`;
-      const quote={no, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, customerTin:cust(j.customerId)?.tin||'', sentAt:nowISO(), validUntil:addDays(today(),14), status:'sent', rev:(j.quote?.rev||0)+1};
-      await F.updateDoc(jobRef(j.id),{quote}); await event(j,`Quotation ${no}${quote.rev>1?' (revised)':''} sent: ${money(totals(quote).total)}. Please review and approve.`,['customer'],'Your quotation is ready'); delete UI.ed[key]; UI.confirm=''; }, 'Quotation sent'); },
-
-  quoteAccept(el){ const j=job(el.dataset.id), note=val('qr-'+j.id);
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{quote:{...j.quote,status:'accepted',respondedAt:nowISO()}}); await event(j,`Quotation ${j.quote.no} accepted${note?': '+note:''}`,['office'],'Quotation accepted'); if(note) await F.addDoc(c('jobs',j.id,'messages'),msgObj(note)); }, 'Quotation accepted'); },
-  quoteDecline(el){ const j=job(el.dataset.id), note=val('qr-'+j.id);
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{quote:{...j.quote,status:'declined',reason:note,respondedAt:nowISO()}}); await event(j,`Quotation ${j.quote.no} declined${note?': '+note:''}`,['office'],'Quotation declined'); }, 'Quotation declined. The office has been told.'); },
-
-  assign(el){ const j=job(el.dataset.id), tid=val('as-'+j.id), t=tech(tid); if(!t) return;
-    if(tid===j.techId && accepted(j)) return toast(`${t.name} already has this job.`);
-    run(async()=>{ const at=nowISO();
-      await F.updateDoc(jobRef(j.id),{techId:tid, assignStatus:'pending', assignedAt:at, open:false, acceptedAt:F.deleteField(), declined:F.deleteField()});
-      await log(j.id,`Sent to ${t.name}. Waiting for them to accept`);
-      await notify({...j, techId:tid},['tech'],'New job for you: please accept',`${j.no} · ${jobTitle(j)} · ${j.island||''}${j.slot?' · '+slotText(j.slot):''}`); }, `Sent to ${t.name}. You'll be told when they accept.`); },
-  offerAll(el){ const j=job(el.dataset.id);
-    const active=S.techs.filter(t=>(S.users.find(u=>u.id===t.id)?.status||'active')==='active');
-    if(!active.length) return toast('There are no active technicians to offer this job to.');
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{open:true, offerAt:nowISO(), techId:F.deleteField(), assignStatus:F.deleteField(), acceptedAt:F.deleteField(), declined:F.deleteField()});
-      await log(j.id,'Offered to all technicians');
-      await notifyTo({...j, open:true}, active.map(t=>t.id), 'Open job: first to take it gets it', `${j.no} · ${jobTitle(j)} · ${j.island||''}${j.slot?' · '+slotText(j.slot):' · '+fd(j.preferredDate)}`); },
-      `Offered to ${active.length} technician${active.length>1?'s':''}`); },
-  stopOffer(el){ const j=job(el.dataset.id); run(async()=>{ await F.updateDoc(jobRef(j.id),{open:false}); await log(j.id,'No longer offered to all technicians'); }, 'Job is no longer offered'); },
-  acceptJob(el){ const j=job(el.dataset.id); el.disabled=true;
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{assignStatus:'accepted', acceptedAt:nowISO()});
-      await log(j.id,`${myName()} accepted the job`);
-      await notify(j,['office'],'Job accepted',`${j.no} · ${myName()} accepted the job`);
-      await notify(j,['customer'],'Your technician is confirmed',`${j.no} · ${myName()} will do your service${j.slot?' on '+slotText(j.slot):''}.`); }, 'Job accepted. The office and the customer have been told.').finally(()=>el.disabled=false); },
-  declineJob(el){ const j=job(el.dataset.id), reason=val('dr-'+j.id);
-    // Tell the office first: after declining, the job is no longer visible to this technician.
-    run(async()=>{ await event(j,`${myName()} declined the job${reason?': '+reason:''}`,['office'],'Job declined');
-      await F.updateDoc(jobRef(j.id),{assignStatus:'declined', techId:F.deleteField(), declined:{uid:ME.user.uid, name:myName(), reason, at:nowISO()}});
-      UI.sel=''; }, 'Job declined. The office has been told.'); },
-  takeJob(el){ const id=el.dataset.id, uid=ME.user.uid; el.disabled=true;
-    run(async()=>{ const at=nowISO();
-      await F.runTransaction(db, async tx=>{ const s=await tx.get(jobRef(id)), x=s.exists()?s.data():null;
-        if(!x || !x.open || x.techId) throw {message:'Another technician already took this job.'};
-        tx.update(jobRef(id),{techId:uid, open:false, assignStatus:'accepted', acceptedAt:at, assignedAt:at}); });
-      const j={...job(id), techId:uid, open:false};
-      await log(id,`${myName()} took the job`);
-      await notify(j,['office'],'Job taken',`${j.no} · ${myName()} took the job`);
-      await notify(j,['customer'],'Your technician is confirmed',`${j.no} · ${myName()} will do your service${j.slot?' on '+slotText(j.slot):''}.`); }, 'The job is yours. The office and the customer have been told.').finally(()=>el.disabled=false); },
-
-  async startTrip(el){ const j=job(el.dataset.id), eta=Math.max(1,Math.min(240,+val('eta-'+j.id)||25));
-    el.disabled=true; toast('Getting your location…');
-    const p=await getPosOnce();
-    const data={departedAt:nowISO(), etaMins:eta}; if(p){ data.loc=p; data.trail=[{lat:p.lat,lng:p.lng}]; GPS.lastWrite=Date.now(); GPS.last=p; }
-    await run(async()=>{ await F.updateDoc(jobRef(j.id),data); await event(j,`${myName()} is on the way. Expected in about ${eta} min`,['customer','office'],'Technician on the way'); }, p?'Trip started. Your location is shared.':'Trip started, but location is off. Allow location access so the customer can follow you.');
-    el.disabled=false; },
-  arrived(el){ const j=job(el.dataset.id); stopGPS();
-    const pts=[...(j.trail||[]), ...(j.loc?[j.loc]:[])]; let km=0; for(let i=1;i<pts.length;i++) km+=haversineKm(pts[i-1],pts[i]);
-    const trip={mins:Math.max(1,Math.round((Date.now()-new Date(j.departedAt))/60000)), km:Math.round(km*10)/10};
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{arrivedAt:nowISO(), trip, loc:F.deleteField(), trail:F.deleteField()}); CLEARED.add(j.id);
-      await event(j,`${myName()} has arrived`,['customer','office'],'Technician has arrived'); }, 'Arrival recorded. Location sharing stopped.'); },
-  finish(el){ const j=job(el.dataset.id), {notes, parts, report}=readReportForm(j, 'rf-'+j.id);
-    if(!notes) return toast('Describe the work done before finishing.');
-    stopGPS();
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{finishedAt:nowISO(), workNotes:notes, parts, report, loc:F.deleteField(), trail:F.deleteField()});
-      await event(j,`Work finished by ${myName()}: ${notes}`,['customer','office'],'Service finished'); }, 'Job marked finished'); },
-
-  viewReport(el){ const j=job(el.dataset.id); pdfLibs().catch(()=>{});
-    UI.modal={title:`Service report ${j.no}`, wide:true, html:reportDoc(j)+`<div class="row no-print" style="margin-top:14px"><button class="btn primary" data-act="reportShare" data-fmt="save" data-id="${j.id}">⤓ Save PDF</button>
-      <button class="btn ${ME.role!=='customer'?'wa':''}" data-act="reportShare" data-fmt="pdf" data-id="${j.id}">${ME.role!=='customer'?'Send PDF':'Share PDF'}</button>${ME.role!=='customer'?`<button class="btn wa" data-act="reportShare" data-fmt="img" data-id="${j.id}">Send as photo</button>`:''}
-      <button class="btn" data-act="printReport">Print</button></div>`}; render(); },
-  printReport(){ printReport(); },
-  async copyText(el){ const t=el.dataset.text; try{ await navigator.clipboard.writeText(t); toast('Copied. Paste it in any chat.'); }
-    catch(e){ const ta=document.getElementById('share-text'); if(ta){ ta.select(); document.execCommand('copy'); toast('Copied.'); } else toast("Couldn't copy."); } },
-  async shareText(el){ try{ await navigator.share({text:el.dataset.text}); }catch(e){} },
-  printDoc(el){ const j=job(el.dataset.id), kind=el.dataset.kind, D=kind==='Invoice'?j.invoice:j.quote; if(!D) return;
-    pdfLibs().catch(()=>{});   // get the PDF maker ready while the document is on screen
-    UI.modal={title:`${kind} ${D.no}`, wide:true, html:docView(kind,D,j)+docActions(kind,D,j).replace('data-act="printDoc"','data-act="printReport"').replace('View / print','Print')}; render(); },
-  docSave(el){ const j=job(el.dataset.id), kind=el.dataset.kind, D=kind==='Invoice'?j.invoice:j.quote; if(!D) return;
-    saveDocFile(docView(kind,D,j), `${kind}-${D.no}`).catch(e=>toast(e.message||"Couldn't make the PDF.")); },
-  docShare(el){ const j=job(el.dataset.id), kind=el.dataset.kind, D=kind==='Invoice'?j.invoice:j.quote; if(!D) return;
-    shareDocFile(docView(kind,D,j), `${kind}-${D.no}`, el.dataset.fmt, docText(kind,D,j), ME.role!=='customer'?j.customerPhone:'').catch(e=>toast(e.message||"Couldn't make the file.")); },
-  reportShare(el){ const j=job(el.dataset.id); if(!j?.report) return;
-    const fmt=el.dataset.fmt, html=reportDoc(j), name=`Service-report-${j.no}`;
-    (fmt==='save' ? saveDocFile(html, name) : shareDocFile(html, name, fmt, `${co().name}: service report for ${j.no}.`, ME.role!=='customer'?j.customerPhone:'')).catch(e=>toast(e.message||"Couldn't make the file.")); },
-  async shareReady(){ const r=READY; READY=null; UI.modal=null; render(); if(!r) return; try{ await navigator.share({files:[r.file], text:r.text}); }catch(e){} },
-  officeQuote(el){ const j=job(el.dataset.id), v=el.dataset.v;
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{quote:{...j.quote, status:v, respondedAt:nowISO(), recordedBy:myName()}});
-      await log(j.id, `Quotation ${j.quote.no} ${v} by the customer (recorded by ${myName()})`); }, v==='accepted'?'Marked as accepted':'Marked as declined'); },
-  editReport(el){ const j=job(el.dataset.id); UI.modal={title:`Service report ${j.no}`, html:reportForm(j,'re-'+j.id)+`<div class="row"><button class="btn primary" data-act="saveReport" data-id="${j.id}">Save report</button></div>`}; render(); },
-  saveReport(el){ const j=job(el.dataset.id), {notes, parts, report}=readReportForm(j, 're-'+j.id);
-    if(!notes) return toast('Describe the work done.');
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{workNotes:notes, parts, report}); UI.modal=null; }, 'Report saved'); },
-  sendReport(el){ const j=job(el.dataset.id); if(!j.report) return toast('Fill in the report first.');
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{reportSentAt:nowISO()});
-      await event(j,`Service report sent by ${myName()}`,['customer'],'Your service report is ready');
-      await notify(j,[ME.role==='provider'?'tech':'office'],'Service report sent',`${j.no} · ${myName()} sent the service report to ${j.customerName||'the customer'}`); }, 'Report sent to the customer'); },
-  /* ---------- office: delete unwanted documents and figures ----------
-     Accounting stays balanced: an invoice's sale entry and its payment entry go with it. */
-  delInvoice(el){ const j=job(el.dataset.id), k='delinv'+j.id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
-    run(async()=>{ const b=F.writeBatch(db), no=j.invoice?.no;
-      b.update(jobRef(j.id), {invoice:F.deleteField(), payment:F.deleteField(), receipt:F.deleteField()});
-      b.delete(d('ledger','inv-'+j.id)); b.delete(d('ledger','pay-'+j.id)); b.delete(d('jobs',j.id,'files','receipt'));
-      await b.commit(); await log(j.id, `Invoice ${no} deleted by ${myName()}`); }, 'Invoice deleted and removed from Accounting'); },
-  delQuote(el){ const j=job(el.dataset.id), k='delq'+j.id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
-    run(async()=>{ const no=j.quote?.no; await F.updateDoc(jobRef(j.id), {quote:F.deleteField()}); delete UI.ed['q-'+j.id]; await log(j.id, `Quotation ${no} deleted by ${myName()}`); }, 'Quotation deleted'); },
-  delJob(el){ const j=job(el.dataset.id), k='deljob'+j.id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
-    run(async()=>{
-      const msgs=await F.getDocs(c('jobs',j.id,'messages'));
-      for(let i=0;i<msgs.docs.length;i+=400){ const b=F.writeBatch(db); msgs.docs.slice(i,i+400).forEach(x=>b.delete(x.ref)); await b.commit(); }
-      const b=F.writeBatch(db);
-      b.delete(d('ledger','inv-'+j.id)); b.delete(d('ledger','pay-'+j.id)); b.delete(d('jobs',j.id,'files','receipt')); b.delete(jobRef(j.id));
-      await b.commit(); UI.sel=''; }, `${j.no} deleted`); },
-  officeFinish(el){ const j=job(el.dataset.id), {notes, parts, report}=readReportForm(j, 'of-'+j.id), at=nowISO();
-    run(async()=>{
-      await F.updateDoc(jobRef(j.id), {finishedAt:at, arrivedAt:j.arrivedAt||at, workNotes:notes||'Work completed.', parts, report, finishedBy:'office', loc:F.deleteField(), trail:F.deleteField()});
-      await event(j, `Job marked done by the office (${myName()})`, ['customer','tech'], 'Your service is done');
-    }, 'Job marked done'); },
-  sendInvoice(el){ const j=job(el.dataset.id), key='i-'+j.id, e=UI.ed[key];
-    const lines=e.lines.filter(l=>String(l.desc).trim()).map(l=>({desc:String(l.desc).trim(),qty:+l.qty||0,rate:r2(l.rate)}));
-    const methods=Object.keys(METHODS).filter(k=>e.methods[k]);
-    if(!lines.length) return toast('Add at least one line to the invoice.');
-    if(!methods.length) return toast('Choose at least one payment method.');
+    run(async()=>{ await F.runTransaction(db, async tx=>{
+        const cur={}; for(const id of ids){ const s=await tx.get(d('items',id)); if(!s.exists()) throw new Error('An item on this bill was deleted.'); cur[id]=s.data(); }
+        lines.forEach((l,i)=>{ const it=cur[l.itemId], q=+l.qty, cst=r2(l.cost), have=Math.max(0,+it.qty||0);
+          // Weighted average cost: what's on the shelf and what's just been bought.
+          it.cost = have+q>0 ? r2((have*(+it.cost||0)+q*cst)/(have+q)) : cst; it.qty=r2((+it.qty||0)+q); it.lastCost=cst;
+          tx.set(d('stock', i?`${billId}-${i}`:billId), {itemId:l.itemId, name:it.name, type:'bought', qty:q, cost:cst, date:B.date, ref:B.ref||'', memo:B.supplier?`From ${B.supplier}`:'', billId, at, by:myName()}); });
+        for(const id of ids) tx.update(d('items',id), {qty:cur[id].qty, cost:cur[id].cost, lastCost:cur[id].lastCost, updatedAt:at});
+        if(total>0) tx.set(d('ledger','buy-'+billId), {date:B.date, at, ref:B.ref||('BUY-'+B.date.replace(/-/g,'').slice(2)), memo:`Stock bought${B.supplier?' from '+B.supplier:''}`, lines:[{acct:'1200',dr:total},{acct:B.from,cr:total}]});
+      }); closeForm(); }, `Added to stock · ${money(total)} posted to Accounting`).finally(()=>{ el.disabled=false; }); },
+  adjSave(el){ const it=item(el.dataset.id), A=UI.adj; if(!it||!A) return;
+    const count=+A.count; if(A.count===''||isNaN(count)) return toast('Enter the actual quantity.');
+    const diff=r2(count-(+it.qty||0)); if(!diff) return toast('Nothing to change: the quantity is the same.');
+    const mid=newId('stock'), at=nowISO(), v=r2(Math.abs(diff)*(+it.cost||0));
     el.disabled=true;
-    run(async()=>{
-      await F.runTransaction(db, async tx=>{
-        const cref=d('counters','invoices'), cs=await tx.get(cref), n=(cs.exists()?cs.data().n:0)+1;
-        const inv={no:`INV-${today().slice(0,4)}-${pad(n)}`, lines, discount:r2(e.discount), notes:e.notes||'', gstRate:co().gstRate, customerTin:cust(j.customerId)?.tin||'', issuedAt:nowISO(), dueDate:addDays(today(),+e.dueDays||0), methods};
-        const t=totals(inv); Object.assign(inv,{subtotal:t.net, gst:t.gst, total:t.total});
-        tx.set(cref,{n});
-        tx.update(jobRef(j.id),{invoice:inv});
-        tx.set(d('ledger','inv-'+j.id),{date:today(), at:nowISO(), ref:inv.no, memo:`Invoice to ${j.customerName||'customer'}`, jobId:j.id,
-          lines:[{acct:'1100',dr:t.total},{acct:'4000',cr:t.net},{acct:'2100',cr:t.gst}].filter(l=>(l.dr||l.cr)>0)});
-        UI._lastInv=inv;
-      });
-      await event(j,`Invoice ${UI._lastInv.no}: ${money(UI._lastInv.total)}, due ${fd(UI._lastInv.dueDate)}`,['customer'],'Your invoice is ready'); delete UI.ed[key];
-      await notify(j,['tech'],'Invoice raised',`${j.no} · Invoice raised for ${j.customerName||'the customer'}`);
-    }, 'Invoice sent and posted to accounts').finally(()=>el.disabled=false); },
-
-  pay(el){ const j=job(el.dataset.id), m=el.dataset.m, I=j.invoice, r=UI.rcpt[j.id], at=nowISO();
-    const withReceipt = b => { if(!r) return {}; b.set(d('jobs',j.id,'files','receipt'),{...r, at, uid:ME.user.uid}); return {receipt:{name:r.name, type:r.type, at}}; };
-    if(!METHODS[m].transfer) return run(async()=>{ const b=F.writeBatch(db); const extra=withReceipt(b);
-      b.update(jobRef(j.id),{payment:{method:m,status:'pending',amount:I.total,requestedAt:at}, ...extra}); await b.commit(); delete UI.rcpt[j.id];
-      await event(j,`Customer will pay ${money(I.total)} by ${METHODS[m].n.toLowerCase()} on site`,['office'],'Payment to collect');
-      await notify(j,['tech'],'Payment to collect',`${j.no} · The customer will pay by ${METHODS[m].n.toLowerCase()} on site. Collect it and hand it to the office.`); }, 'Noted. Pay the technician or the office.');
-    const ref=val('pr-'+j.id); if(!ref && !r) return toast('Enter the bank reference or upload the receipt.');
-    el.disabled=true;
-    run(async()=>{ const b=F.writeBatch(db); const extra=withReceipt(b);
-      b.update(jobRef(j.id),{payment:{method:m,ref,amount:I.total,status:'paid',verified:false,paidAt:at}, ...extra});
-      b.set(d('ledger','pay-'+j.id), payEntry(j,m,ref||'receipt uploaded'));
-      await b.commit(); delete UI.rcpt[j.id];
-      await event(j,`${money(I.total)} paid by ${METHODS[m].n}${ref?' · Ref '+ref:''}${r?' · receipt attached':''}. Please verify.`,['office'],'Payment received');
-      await notify(j,['tech'],'Job paid',`${j.no} · The customer has paid.`); }, 'Payment details sent. Thank you!').finally(()=>el.disabled=false); },
-  confirmPay(el){ const j=job(el.dataset.id); settle(j, j.payment.method, j.payment.ref||'', 'Payment recorded'); },
-  recordPay(el){ const j=job(el.dataset.id); settle(j, val('rp-m-'+j.id)||'cash', val('rp-r-'+j.id), 'Payment recorded'); },
-  verifyPay(el){ const j=job(el.dataset.id); run(async()=>{ await F.updateDoc(jobRef(j.id),{'payment.verified':true}); await event(j,`Your payment of ${money(j.payment.amount)} is confirmed. Thank you!`,['customer'],'Payment confirmed'); }, 'Marked as received'); },
-  reversePay(el){ const j=job(el.dataset.id), k='rev'+j.id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
-    run(async()=>{ const b=F.writeBatch(db); b.update(jobRef(j.id),{payment:F.deleteField()}); b.delete(d('ledger','pay-'+j.id)); await b.commit(); await event(j,`We couldn't find your transfer${j.payment.ref?' ('+j.payment.ref+')':''}. Please check it and pay again, or contact us.`,['customer'],'Payment not received'); }, 'Payment reversed'); },
-
-  rate(el){ const j=job(el.dataset.id), n=+(document.querySelector(`input[name="rt-${j.id}"]:checked`)?.value||0), text=val('rf-'+j.id);
-    if(!n) return toast('Choose 1 to 5 stars.');
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{rating:{stars:n,text,at:nowISO()}}); await event(j,`Rated ${n} of 5${text?': “'+text+'”':''}`,['office','tech'],'New customer rating'); }, 'Thanks for your feedback'); },
-  sendMsg(el){ const j=job(el.dataset.id), text=val('msg-'+j.id); if(!text) return;
-    run(async()=>{ await F.addDoc(c('jobs',j.id,'messages'),msgObj(text)); const t=document.getElementById('msg-'+j.id); if(t) t.value='';
-      await notify(j,['office','customer','tech'],`Message from ${myName()}`,`${j.no} · ${text.slice(0,180)}`); }); },
-  cancelJob(el){ const j=job(el.dataset.id), k='cancel'+j.id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
-    run(async()=>{ await F.updateDoc(jobRef(j.id),{cancelled:true}); await event(j,`Request cancelled by ${ME.role==='customer'?'the customer':'the office'}`,['office','customer','tech'],'Request cancelled'); }, 'Request cancelled'); },
+    run(async()=>{ await F.runTransaction(db, async tx=>{
+        const s=await tx.get(d('items',it.id)); const now=+s.data().qty||0;
+        tx.update(d('items',it.id), {qty:r2(now+diff), updatedAt:at});
+        tx.set(d('stock',mid), {itemId:it.id, name:it.name, type:'adjust', qty:diff, cost:+it.cost||0, date:today(), ref:A.reason, memo:A.memo||'', at, by:myName()});
+        if(v>0) tx.set(d('ledger','adj-'+mid), {date:today(), at, ref:'STOCK-ADJ', memo:`${A.reason}: ${it.name} ${diff>0?'+':''}${qtyTxt(diff,it.unit)}`,
+          lines: diff<0 ? [{acct:'5000',dr:v},{acct:'1200',cr:v}] : [{acct:'1200',dr:v},{acct:'5000',cr:v}]}); });
+      closeForm(); }, 'Stock adjusted').finally(()=>{ el.disabled=false; }); },
+  invDelItem(el){ const it=item(el.dataset.id), k='delitem'+it.id;
+    if(UI.confirm!==k){ UI.confirm=k; return render(); }
+    if(+it.qty){ return toast('Adjust the quantity to 0 first, or hide the item instead.'); }
+    UI.confirm=''; run(async()=>{ await F.deleteDoc(d('items',it.id)); closeForm(); }, 'Item deleted'); },
+  // Undo a purchase (the whole bill), an adjustment or opening stock: quantities, costs and Accounting go back.
+  invDelMove(el){ const m=S.stock.find(x=>x.id===el.dataset.id); if(!m) return; const k='delmv'+(m.billId||m.id);
+    if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
+    const moves=m.billId? S.stock.filter(x=>x.billId===m.billId) : [m], ids=[...new Set(moves.map(x=>x.itemId))];
+    run(async()=>{ await F.runTransaction(db, async tx=>{
+        const cur={}; for(const id of ids){ const s=await tx.get(d('items',id)); if(s.exists()) cur[id]=s.data(); }
+        for(const x of moves){ const it=cur[x.itemId]; if(!it) continue; const left=r2((+it.qty||0)-x.qty);
+          if(x.type==='bought' || x.type==='opening'){ const v=(+it.qty||0)*(+it.cost||0)-x.qty*(+x.cost||0); it.cost = left>0 && v>0 ? r2(v/left) : (+it.cost||0); }
+          it.qty=left; }
+        for(const id of Object.keys(cur)) tx.update(d('items',id), {qty:cur[id].qty, cost:cur[id].cost, updatedAt:nowISO()});
+        for(const x of moves) tx.delete(d('stock',x.id));
+        if(m.billId) tx.delete(d('ledger','buy-'+m.billId)); else if(m.type==='adjust') tx.delete(d('ledger','adj-'+m.id)); else tx.delete(d('ledger','stk-'+m.id)); });
+    }, m.billId?'Bill undone and removed from Accounting':'Undone'); }
 };
-function payEntry(j, method, ref){
-  const amt=j.invoice.total;
-  return {date:today(), at:nowISO(), ref:j.invoice.no, memo:`Payment by ${METHODS[method]?.n||method}${ref?' · '+ref:''}`, jobId:j.id, lines:[{acct:METHODS[method]?.acct||'1000',dr:amt},{acct:'1100',cr:amt}]};
-}
-function settle(j, method, ref, okText){
-  run(async()=>{ const b=F.writeBatch(db);
-    b.update(jobRef(j.id),{payment:{method,ref:ref||'',amount:j.invoice.total,status:'paid',verified:true,paidAt:nowISO()}});
-    b.set(d('ledger','pay-'+j.id), payEntry(j,method,ref));
-    await b.commit(); await event(j,`Payment of ${money(j.invoice.total)} received by ${METHODS[method]?.n||method}. Thank you!`,['customer'],'Payment confirmed');
-    if(j.payment?.status!=='paid') await notify(j,['tech'],'Job paid',`${j.no} · Paid by ${(METHODS[method]?.n||method).toLowerCase()}.`); }, okText);
-}
-const FORMS = {
-  async signin(f,dd){ await run(()=>A.signInWithEmailAndPassword(auth, dd.email, dd.password)); },
-  async signup(f,dd){
-    const kind = PORTAL==='admin' ? 'owner' : 'customer';
-    if(kind==='owner' && OWNER_EXISTS!==false) return toast('This portal already has an office account. Sign in instead.');
-    UI.creating=true; render();
-    const ok=await run(async()=>{
-      let cr;
-      try{ cr=await A.createUserWithEmailAndPassword(auth, dd.email, dd.password); }
-      catch(e){
-        if(!String(e?.code).includes('email-already-in-use')) throw e;
-        // The email already has a login (an old account, or another company): if the password matches, use it.
-        try{ cr=await A.signInWithEmailAndPassword(auth, dd.email, dd.password); }
-        catch(e2){ throw {message:`This email already has a login. Sign in with its password, or tap "Forgot password?" to set a new one.`}; }
-        if((await F.getDoc(d('users',cr.user.uid))).exists()){ UI.creating=false; return; }   // already in this company: just signed in
-      }
-      ME.user=cr.user; await A.updateProfile(cr.user,{displayName:dd.name});
-      if(kind==='owner'){
-        // First run of the one-company site: the company itself is created here.
-        if(CO===FIRST_RUN_CO && !S.tenant) await F.setDoc(tenantRef(), {name:dd.company||'', status:'active', createdAt:nowISO()});
-        await A.sendEmailVerification(cr.user).catch(()=>{}); UI.ownerDraft=dd; return; }
-      await createProfile(dd, kind); }, kind==='owner'?'Account created. Check your email to verify it.':'Account created');
-    UI.creating=false; if(ok && kind==='owner'){ UI.ptab='settings'; saveUI(); } render(); },
-  async completeProfile(f,dd){ const kind=f.dataset.kind; UI.creating=true; render();
-    const ok=await run(async()=>{ try{ await createProfile({...dd, email:ME.user.email}, kind); }
-      catch(e){ if(kind==='owner' && String(e?.code).includes('permission')) throw {message:`This email isn't the one set up for ${brandName()}. Sign in with the email you gave the platform admin.`}; throw e; } }); UI.creating=false; if(ok && kind==='owner'){ UI.ptab='settings'; saveUI(); } render(); },
-  findCompany(f,dd){ const code=dd.code.toLowerCase().replace(/[^a-z0-9-]/g,''); if(!code) return;
-    location.href = location.protocol==='file:'||/^(localhost|127\.)/.test(location.hostname) ? `/${PORTAL_URL[PORTAL]}?c=${code}` : `/${code}${{customer:'',technician:'/tech',admin:'/admin'}[PORTAL]}`; },
-  async reset(f,dd){ await run(()=>A.sendPasswordResetEmail(auth, dd.email), 'Check your email for the reset link'); UI.authMode='signin'; render(); }
+
+export const inventoryChange = {
+  buyItem(el){ const B=buyState(), i=+el.dataset.buy.split('.')[1], it=item(el.value); B.lines[i].itemId=el.value; if(it) B.lines[i].cost=+it.lastCost||+it.cost||0; render(); }
 };
-const CHANGE = {
-  async receiptFile(el){ const f=el.files?.[0]; if(!f) return; toast('Preparing the receipt…');
-    try{ UI.rcpt[el.dataset.id]=await readReceipt(f); render(); }catch(e){ toast(e.message||'Could not read that file.'); el.value=''; } },
-  addSvcLine(el){ const s=sv(el.value); if(!s) return; UI.ed[el.dataset.key].lines.push({desc:s.name,qty:1,rate:s.price}); render(); },
-  payMethod(el){ UI.payM[el.dataset.id]=el.value; render(); }
-};
-const pick = (o,k) => (P[o] && P[o][k]) || ({ACT,FORMS,CHANGE})[{actions:'ACT',forms:'FORMS',change:'CHANGE'}[o]][k];
 
-document.addEventListener('click', e=>{ const el=e.target.closest('[data-act]'); if(!el) return; const fn=pick('actions',el.dataset.act); if(fn){ e.preventDefault(); fn(el); } });
-document.addEventListener('submit', e=>{ const f=e.target, h=pick('forms',f.dataset.form); if(!h) return; e.preventDefault(); const fdata=new FormData(f), dd={}; for(const [k,v] of fdata.entries()) dd[k]=typeof v==='string'?v.trim():v; h(f,dd,fdata); });
-document.addEventListener('change', e=>{ const el=e.target;
-  const fn = el.dataset.change && pick('change',el.dataset.change); if(fn) return fn(el);
-  if(el.dataset.ed && el.type==='checkbox') setPath(UI.ed[el.dataset.ed], el.dataset.f, el.checked); });
-document.addEventListener('input', e=>{ const el=e.target;
-  if(el.dataset.ed && el.type!=='checkbox'){ setPath(UI.ed[el.dataset.ed], el.dataset.f, el.value); updateTotals(el.dataset.ed); }
-  if(el.dataset.input==='search'){ UI.q=el.value; render(); } });
-
-const sendReset = email => A.sendPasswordResetEmail(auth, email);
-
-/** Each portal entry file calls start({view, actions, forms, change}). */
-function start(def){
-  Object.assign(P, def);
-  const qs=new URLSearchParams(location.search), qj=qs.get('job'), qc=qs.get('chat');
-  if(qj) UI.pendingJob=qj;
-  if(qc) UI.pendingChat=qc;
-  if(qj||qc){ try{ qs.delete('job'); qs.delete('chat'); history.replaceState(null,'',location.pathname+(qs.toString()?'?'+qs:'')); }catch(e){} }
-  if(CONFIGURED && CO){ startAuth(); registerSW(); }
-  navigator.serviceWorker?.addEventListener('message', e=>{ if(e.data?.type!=='open') return; const q=new URL(e.data.url, location.href).searchParams, id=q.get('job'), ch=q.get('chat');
-    if(ch) openChat(ch); else if(id){ if(job(id)) openJobById(id); else UI.pendingJob=id; } render(); });
-  // Enter sends a chat message on a computer; Shift+Enter adds a new line.
-  document.addEventListener('keydown', e=>{ if(e.target.id==='chat-text' && e.key==='Enter' && !e.shiftKey && !matchMedia('(pointer:coarse)').matches){ e.preventDefault(); ACT.chatSend(); } });
-  document.addEventListener('keydown', e=>{ if(e.key==='Escape' && (UI.bell||UI.modal)){ UI.bell=false; UI.modal=null; render(); } });
-  render();
-}
-
-export { jsPdfLib, saveBlob, privacyLink, PRIVACY_URL, inviteText, shareModal, customerLink, addrLine, SINGLE, DEFAULT_CO, custTin, callAdmin, ACCOUNT_PERKS, ISSUES, recommendServices, CHECKS, CONDITION, reportSec, reportDoc, waLink, waNumber, addMonths, printReport, A, ACCTS, ACT, AC_TYPES, BRAND, BRAND_PRESETS, BTUS, CHANGE, CLEARED, CO, CONFIG_ERROR, CUR, F, FIRST_SCREEN, FORMS, GPS, HERO, IN_APP, LEAFLET, MAPS, MARKED, ME, METHODS, OWNER_EXISTS, P, PATH_MODE, PCFG, PORTAL, PORTAL_NAME, PORTAL_ROLE, PORTAL_URL, PUSH_TOKEN, RESERVED, S, SETTINGS, ST, STALE_H, STEPS, SVC_ICONS, SW_REG, TZ, UI, WINDOWS, accepted, addDays, ago, alertItem, appMod, applyBrand, attachMaps, auth, authView, avgRating, balances, bellButton, bellPanel, brandName, brandPalette, busyTech, c, chatSub, chatThread, chatUnread, clearDeviceCopies, clone, co, completeProfileView, contrast, copyBtn, createLogin, createMap, createProfile, cust, d, db, defaultMarkSvg, docView, ensureGPS, errMsg, esc, etaHTML, event, fbApp, fd, fdt, fileToDataUrl, findCompanyView, firebaseConfig, ft, gateView, getPosOnce, haversineKm, header, hint, hx, icon, iconsT, inboxId, initials, invoiceSec, itemUrl, job, jobDetail, jobItem, jobRef, jobTitle, leafletP, lineEditor, loadImg, loadLeaflet, loadUI, loaded, log, lum, makeIcon, markChatRead, markSVG, messagesSec, mix, modalView, money, msgObj, myActiveTrip, myCustomer, myName, nextNumber, notify, notifyTo, nowISO, openChat, openChatId, openJobById, openJobDetail, overdue, pad, payEntry, payPanel, pickDefault, pill, portalHref, portalLink, portalOfRecipient, profileExtraFields, pushPrompt, pushState, pushTried, quoteSec, r2, ratingSec, readLogo, readReceipt, readable, ready, receiptLine, receiptPicker, recipients, registerPush, registerSW, render, requestSec, rq, run, saveShell, saveUI, schedRender, scheduleSec, sendPos, sendReset, setMarker, setPath, setTitle, settle, setupView, shellT, sideBal, slotText, snapList, stage, staleTrip, stars, start, startAuth, startInbox, startSubs, stopGPS, stopSubs, subCol, sv, syncChatSub, syncMsgSub, sys, t12, tech, techNext, techSec, tenantRef, toHex, toast, toastT, today, totHTML, totals, tracker, trackingSec, unread, unsubs, updateIcons, updateMap, updateTotals, val, verifyEmailView, view, workSec };
+// Typing in the buy and adjust forms: keep the values, update the amounts without a full redraw.
+document.addEventListener('input', e=>{ const t=e.target;
+  if(t.dataset.input==='invq'){ UI.invq=t.value; render(); return; }
+  if(t.dataset.buy && t.tagName!=='SELECT'){ const B=buyState(), p=t.dataset.buy.split('.');
+    if(p[0]==='lines'){ B.lines[+p[1]][p[2]]=t.value; const l=B.lines[+p[1]], a=document.querySelector(`[data-buyamt="${p[1]}"]`); if(a) a.textContent=money((+l.qty||0)*(+l.cost||0)); }
+    else B[p[0]]=t.value;
+    const tot=document.getElementById('buy-total'); if(tot) tot.textContent=money(B.lines.reduce((a,l)=>a+(+l.qty||0)*(+l.cost||0),0)); }
+  if(t.dataset.adj && UI.adj){ UI.adj[t.dataset.adj]=t.value; if(t.dataset.adj==='count'){ const it=item(UI.inv?.id), out=document.getElementById('adj-diff');
+    if(it && out){ const diff=r2((+t.value||0)-(+it.qty||0)); out.value=`${diff>0?'+':''}${qtyTxt(diff,it.unit)} · ${money(Math.abs(diff)*(+it.cost||0))}`; } } } });
+document.addEventListener('change', e=>{ const t=e.target;
+  if(t.id==='buy-from' && UI.buy){ UI.buy.from=t.value; render(); }
+  if(t.dataset.adj==='reason' && UI.adj) UI.adj.reason=t.value; });
