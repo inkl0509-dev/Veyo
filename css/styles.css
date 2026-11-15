@@ -755,3 +755,7 @@ body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5
 .buy-lines select{min-width:0;width:100%}
 @media (max-width:700px){ .inv-table td.nowrap{white-space:normal} .inv-table td.nowrap .btn{margin:2px 0} }
 @media (max-width:700px){ .inv-table .hide-sm{display:none} .inv-acts{display:flex;flex-direction:column;gap:4px;align-items:stretch} .inv-acts .btn{margin:0} }
+/* small spinner inside a busy button */
+.spin{display:inline-block;width:14px;height:14px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;vertical-align:-2px;margin-right:6px;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation-duration:2.4s}}
