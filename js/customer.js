@@ -5,7 +5,7 @@ import { btuCalculator, btu as calcBtu, bookingSize } from './tools.js';
 const { S, ME, UI, F, db, WINDOWS, AC_TYPES, BTUS, SVC_ICONS, METHODS, TZ, esc, money, today, addDays, nowISO, fd, ft, slotText,
   job, sv, tech, co, PCFG, stage, pill, jobTitle, myCustomer, pickDefault, run, toast, render, saveUI, d, c, event, initials,
   trackingSec, quoteSec, invoiceSec, ratingSec, workSec, messagesSec, avgRating, stars, etaHTML, totals, overdue, staleTrip,
-  pushState, pushPrompt, accepted } = K;
+  pushState, pushPrompt, accepted, errMsg } = K;
 
 const ICON = {
   home:'<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/>',
@@ -219,9 +219,9 @@ function bookWizard(me){
     <div class="wiz-top"><h1 class="ctitle">Book a service</h1>
       <ol class="wiz-steps">${BK_STEPS.map((l,i)=>`<li class="${i+1<b.step?'done':i+1===b.step?'cur':''}">${i+1<b.step?`<button data-act="bkGo" data-v="${i+1}">`:'<span>'}<i>${i+1}</i><span class="ws-l">${l}</span>${i+1<b.step?'</button>':'</span>'}</li>`).join('')}</ol></div>
     <div class="wiz-body card">${steps[b.step-1](b,me)}</div>
-    <div class="wiz-bar">${b.step>1?'<button class="btn" data-act="bkBack">Back</button>':'<span></span>'}
+    <div class="wiz-bar">${b.step>1?`<button class="btn" data-act="bkBack"${b.sending?' disabled':''}>Back</button>`:'<span></span>'}
       <div class="est">${est?`<span class="small">Estimate</span><b>${money(est.total)}</b>`:''}</div>
-      ${b.step<3?'<button class="btn primary" data-act="bkNext">Next</button>':'<button class="btn coral" data-act="bkSend">Send request</button>'}</div>
+      ${b.step<3?'<button class="btn primary" data-act="bkNext">Next</button>':b.sending?'<button class="btn coral" disabled aria-busy="true"><span class="spin"></span> Sending…</button>':'<button class="btn coral" data-act="bkSend">Send request</button>'}</div>
   </section>`;
 }
 function chips(k, list, cur){ return `<div class="chips big">${list.map(v=>`<button class="chip" data-act="bkSet" data-k="${k}" data-v="${esc(v)}" aria-pressed="${cur===v}">${esc(v)}</button>`).join('')}</div>`; }
@@ -341,29 +341,53 @@ const actions = {
   bkEditAddr(){ UI.bk.editAddr=true; render(); },
   bookAgain(el){ const j=job(el.dataset.id); UI.bk=newBooking(null, j); UI.ctab='book'; UI.sel=''; saveUI(); render(); scrollTo(0,0); },
   toMessages(el){ const t=document.getElementById('msg-'+el.dataset.id); if(t){ t.scrollIntoView({behavior:'smooth',block:'center'}); setTimeout(()=>t.focus({preventScroll:true}),350); } },
-  bkSend(el){ const b=UI.bk, p=UI.pick.book || pickDefault('home');
-    el.disabled=true;
-    run(async()=>{
-      // Guests (and anyone missing details) save their name, phone and address with the first request.
-      if(needDetails() || !myCustomer()?.address){ const name=String(b.name||myCustomer()?.name||'').trim(), phone=String(b.phone||myCustomer()?.phone||'').trim();
-        const wb=F.writeBatch(db);
-        wb.set(d('customers',ME.user.uid), {name, phone, island:b.island.trim(), address:b.address.trim()}, {merge:true});
-        wb.update(d('users',ME.user.uid), {name, phone});
-        await wb.commit(); }
-      const me={...(myCustomer()||{}), name:String(b.name||myCustomer()?.name||'').trim(), phone:String(b.phone||myCustomer()?.phone||'').trim()};
-      const ref=F.doc(c('jobs'));
-      const created=await F.runTransaction(db, async tx=>{ const cref=d('counters','jobs'), cs=await tx.get(cref), n=(cs.exists()?cs.data().n:0)+1; tx.set(cref,{n});
-        const data={no:'SR-'+(1000+n), customerId:ME.user.uid, customerName:me.name, customerPhone:me.phone||'', serviceIds:b.svcs, units:b.units, acType:b.acType, btu:b.btu,
-          preferredDate:b.date, window:b.window, island:b.island.trim(), address:b.address.trim(), issue:[...b.issues, b.note.trim()].filter(Boolean).join('. '), createdAt:nowISO()};
-        if(p) data.dest={lat:p.lat,lng:p.lng};
-        tx.set(ref,data); return data; });
-      if(b.savePin && p) await F.setDoc(d('customers',ME.user.uid),{lat:p.lat, lng:p.lng, island:b.island.trim(), address:b.address.trim()},{merge:true}).catch(()=>{});
-      const j={...created, id:ref.id};
-      await event(j,`New request from ${me.name}: ${jobTitle(j)}, ${fd(b.date)} ${WINDOWS[b.window].split(',')[0].toLowerCase()}`,['office'],'New service request');
-      UI.bk=null; delete UI.pick.book; UI.ctab='jobs'; UI.sel=ref.id; saveUI(); scrollTo(0,0);
-    }, 'Request sent. We will confirm your appointment soon.').finally(()=>{ el.disabled=false; });
+  /* Sending a request. One booking can only ever make one request:
+     - the booking has its own id from the start, so a second tap, a retry after a slow network or a reopened app
+       writes to the same job, which the database refuses (and we then show the job that was made);
+     - "Sending…" stays on screen until it's done, even when the page redraws in between;
+     - the customer sees their request as soon as it's saved; the activity log and the office alert follow
+       in the background instead of keeping them waiting. */
+  bkSend(){ const b=UI.bk; if(!b || b.sending) return;
+    if(!b.id) b.id=F.doc(c('jobs')).id;
+    b.sending=true; render();
+    sendBooking(b).then(ok=>{ if(!ok && UI.bk===b){ b.sending=false; render(); } });
   }
 };
+async function sendBooking(b){
+  const p=UI.pick.book || pickDefault('home'), ref=d('jobs', b.id);
+  const name=String(b.name||myCustomer()?.name||'').trim(), phone=String(b.phone||myCustomer()?.phone||'').trim();
+  const island=b.island.trim(), address=b.address.trim();
+  try{
+    // Guests (and anyone missing details) save their name, phone and address with the first request.
+    // Not waited for: writes go out in order, and the request doesn't depend on it.
+    if(needDetails() || !myCustomer()?.address){
+      const wb=F.writeBatch(db);
+      wb.set(d('customers',ME.user.uid), {name, phone, island, address}, {merge:true});
+      wb.update(d('users',ME.user.uid), {name, phone});
+      wb.commit().catch(e=>console.warn('customer details', e)); }
+    let created;
+    try{
+      created=await F.runTransaction(db, async tx=>{ const cref=d('counters','jobs'), cs=await tx.get(cref), n=(cs.exists()?cs.data().n:0)+1; tx.set(cref,{n});
+        const data={no:'SR-'+(1000+n), customerId:ME.user.uid, customerName:name, customerPhone:phone, serviceIds:b.svcs, units:b.units, acType:b.acType, btu:b.btu,
+          preferredDate:b.date, window:b.window, island, address, issue:[...b.issues, String(b.note||'').trim()].filter(Boolean).join('. '), createdAt:nowISO()};
+        if(p) data.dest={lat:p.lat,lng:p.lng};
+        tx.set(ref,data); return data; });
+    }catch(e){
+      // Already saved by an earlier tap or a retry that lost its answer: use that one.
+      const snap=await F.getDoc(ref).catch(()=>null);
+      if(snap?.exists() && snap.data().customerId===ME.user.uid) created={...snap.data(), already:true};
+      else throw e;
+    }
+    const j={...created, id:ref.id};
+    UI.bk=null; delete UI.pick.book; UI.ctab='jobs'; UI.sel=ref.id; saveUI(); render(); scrollTo(0,0);
+    toast('Request sent. We will confirm your appointment soon.');
+    if(!created.already){
+      if(b.savePin && p) F.setDoc(d('customers',ME.user.uid),{lat:p.lat, lng:p.lng, island, address},{merge:true}).catch(()=>{});
+      event(j,`New request from ${name}: ${jobTitle(j)}, ${fd(b.date)} ${WINDOWS[b.window].split(',')[0].toLowerCase()}`,['office'],'New service request').catch(e=>console.warn('notify office', e));
+    }
+    return true;
+  }catch(e){ console.error(e); toast(errMsg(e)); return false; }
+}
 const forms = {
   profile(f,dd){ const uid=ME.user.uid, p=UI.pick.home || pickDefault('home');
     const data={name:dd.name, phone:dd.phone, island:dd.island, address:dd.address, tin:dd.tin||'', email:ME.user.email||''}; if(p){ data.lat=p.lat; data.lng=p.lng; }

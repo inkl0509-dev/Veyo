@@ -3,12 +3,15 @@
    Each portal page loads its own entry file, which registers its screens with start(). */
 // The config is loaded with a dynamic import so that a typo in it shows a readable message
 // on the page instead of a blank screen.
+const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
+// Start loading Firebase straight away, alongside the settings below, instead of one after the other.
+const SDK = Promise.all([import(FB + 'firebase-app.js'), import(FB + 'firebase-auth.js'), import(FB + 'firebase-firestore.js')]);
+SDK.catch(()=>{});
 let firebaseConfig = null, SETTINGS = {}, CONFIG_ERROR = '';
 try { ({ firebaseConfig, SETTINGS = {} } = await import('./firebase-config.js')); }
 catch (e) { CONFIG_ERROR = String(e && e.message || e); console.error('firebase-config.js', e); }
 SETTINGS = { currency:'MVR', timeZone:'Indian/Maldives', mapCenter:[4.1755,73.5093], avgSpeedKmh:22, gpsIntervalSec:12, vapidKey:'', ...SETTINGS };
 
-const FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
 const CONFIGURED = !!firebaseConfig?.apiKey && !String(firebaseConfig.apiKey).startsWith('YOUR_');
 const PORTAL = document.body.dataset.portal || 'customer';            // customer | technician | admin
 const ROLE_OF = {customer:'customer', technician:'technician', admin:'provider'};
@@ -81,7 +84,7 @@ const portalLink = p => new URL(portalHref(p), location.href).href;
 
 let A, F, appMod, auth, db, fbApp;
 if (CONFIGURED) {
-  const [app, authMod, fsMod] = await Promise.all([import(FB + 'firebase-app.js'), import(FB + 'firebase-auth.js'), import(FB + 'firebase-firestore.js')]);
+  const [app, authMod, fsMod] = await SDK;
   appMod = app; A = authMod; F = fsMod;
   // A separately named Firebase app per portal keeps each portal's sign-in separate in the same browser.
   // A separate Firebase app per company and portal keeps every sign-in separate, even in the same browser.
@@ -498,6 +501,10 @@ async function registerSW(){
   if(!('serviceWorker' in navigator) || !CONFIGURED) return null;
   const q = SETTINGS.vapidKey ? '?'+new URLSearchParams({apiKey:firebaseConfig.apiKey, projectId:firebaseConfig.projectId, messagingSenderId:firebaseConfig.messagingSenderId||'', appId:firebaseConfig.appId||''}) : '';
   try{ SW_REG = await navigator.serviceWorker.register('/sw.js'+q, {scope:'/'}); }catch(e){ console.warn('service worker', e); }
+  // First visit (not yet run by the service worker): hand it this page's files so the next open is instant.
+  if(!navigator.serviceWorker.controller) navigator.serviceWorker.ready.then(r=>{
+    const urls=[location.pathname, ...performance.getEntriesByType('resource').map(e=>e.name).filter(u=>u.startsWith(location.origin))];
+    r.active?.postMessage({type:'acsp-warm', urls}); }).catch(()=>{});
   return SW_REG;
 }
 // Push while every portal is closed needs a VAPID key in firebase-config.js and the Cloud Function in /functions.
@@ -761,11 +768,14 @@ function showUpdateBar(){
   bar.innerHTML=`<span><b>Update available</b> A new version of the portal is ready.</span><button class="btn sm primary" type="button">Update</button>`;
   bar.querySelector('button').onclick=async()=>{ bar.querySelector('button').textContent='Updating…';
     try{ const r=await navigator.serviceWorker?.getRegistration(); await r?.update(); }catch(e){}
+    // Get fresh copies of the saved files first (at most 8 seconds), so the reload opens the new version.
+    try{ const sw=navigator.serviceWorker?.controller; if(sw) await Promise.race([new Promise(res=>{ const ch=new MessageChannel(); ch.port1.onmessage=res; sw.postMessage({type:'acsp-refresh'},[ch.port2]); }), new Promise(r=>setTimeout(r,8000))]); }catch(e){}
     try{ localStorage.removeItem(`acsp-shell-${CO}-${PORTAL}`); }catch(e){}
     location.reload(); };
   document.body.appendChild(bar);
 }
-setTimeout(checkUpdate, 3000);
+setTimeout(checkUpdate, 6000);
+navigator.serviceWorker?.addEventListener('message', e=>{ if(e.data?.type==='acsp-updated'){ UPD_READY=true; showUpdateBar(); } });
 setInterval(checkUpdate, 5*60*1000);
 document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) checkUpdate(); });
 
@@ -1662,7 +1672,7 @@ const ACT = {
   async verifiedContinue(){ try{ await ME.user.reload(); await ME.user.getIdToken(true); ME.user=auth.currentUser; }catch(e){}
     if(!auth.currentUser?.emailVerified) return toast("Your email isn't verified yet. Open the link in the email we sent.");
     ME.user=auth.currentUser; render(); },
-  async guestStart(el){ if(el) el.disabled=true; UI.creating=true; render();
+  async guestStart(el){ if(UI.creating) return; if(el) el.disabled=true; UI.creating=true; render();
     const ok=await run(async()=>{
       const u=ME.user?.isAnonymous ? ME.user : (await A.signInAnonymously(auth)).user;
       ME.user=u;
@@ -1923,9 +1933,12 @@ const ACT = {
   rate(el){ const j=job(el.dataset.id), n=+(document.querySelector(`input[name="rt-${j.id}"]:checked`)?.value||0), text=val('rf-'+j.id);
     if(!n) return toast('Choose 1 to 5 stars.');
     run(async()=>{ await F.updateDoc(jobRef(j.id),{rating:{stars:n,text,at:nowISO()}}); await event(j,`Rated ${n} of 5${text?': “'+text+'”':''}`,['office','tech'],'New customer rating'); }, 'Thanks for your feedback'); },
-  sendMsg(el){ const j=job(el.dataset.id), text=val('msg-'+j.id); if(!text) return;
-    run(async()=>{ await F.addDoc(c('jobs',j.id,'messages'),msgObj(text)); const t=document.getElementById('msg-'+j.id); if(t) t.value='';
-      await notify(j,['office','customer','tech'],`Message from ${myName()}`,`${j.no} · ${text.slice(0,180)}`); }); },
+  // The box is emptied at once, so a second tap can't send the same message again.
+  sendMsg(el){ const j=job(el.dataset.id), t=document.getElementById('msg-'+j.id), text=val('msg-'+j.id); if(!text) return;
+    if(t) t.value='';
+    F.addDoc(c('jobs',j.id,'messages'),msgObj(text))
+      .then(()=>notify(j,['office','customer','tech'],`Message from ${myName()}`,`${j.no} · ${text.slice(0,180)}`))
+      .catch(e=>{ const box=document.getElementById('msg-'+j.id); if(box && !box.value) box.value=text; toast(errMsg(e)); }); },
   cancelJob(el){ const j=job(el.dataset.id), k='cancel'+j.id; if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
     run(async()=>{ await F.updateDoc(jobRef(j.id),{cancelled:true}); await event(j,`Request cancelled by ${ME.role==='customer'?'the customer':'the office'}`,['office','customer','tech'],'Request cancelled'); }, 'Request cancelled'); },
 };
@@ -1999,6 +2012,7 @@ const sendReset = email => A.sendPasswordResetEmail(auth, email);
 
 /** Each portal entry file calls start({view, actions, forms, change}). */
 function start(def){
+  window.__STARTED=true;
   Object.assign(P, def);
   const qs=new URLSearchParams(location.search), qj=qs.get('job'), qc=qs.get('chat');
   if(qj) UI.pendingJob=qj;
