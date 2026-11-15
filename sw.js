@@ -17,9 +17,10 @@ if (params.get('messagingSenderId')) {
 
 /* ---------- faster loading ----------
    Libraries with a version in their address (Firebase, map, fonts) never change: keep them on the device.
-   The portal's own pages, scripts and styles: always try the network first (so updates show at once),
-   and fall back to the saved copy if the network is slow or offline. */
-const CACHE = 'acsp-v4';
+   The portal's own pages, scripts and styles open straight from the saved copy (no waiting for the network,
+   which is what made opening slow on a weak connection), and are refreshed in the background every time.
+   When the background copy turns out to be new, open portals show "Update available"; the next open uses it. */
+const CACHE = 'acsp-v5';
 const KEEP = [/^https:\/\/www\.gstatic\.com\/firebasejs\//, /^https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/(leaflet|html2canvas|jspdf)\//, /^https:\/\/fonts\.(googleapis|gstatic)\.com\//];
 
 async function keepFirst(req){
@@ -29,19 +30,25 @@ async function keepFirst(req){
   if (res.ok || res.type === 'opaque') { const c = await caches.open(CACHE); c.put(req, res.clone()); }
   return res;
 }
-async function networkFirst(req, waitMs){
+const stamp = r => r && (r.headers.get('etag') || r.headers.get('last-modified') || r.headers.get('content-length') || '');
+let told = 0;
+async function tellUpdated(){
+  if (Date.now() - told < 10000) return; told = Date.now();
+  for (const w of await self.clients.matchAll({ type: 'window' })) w.postMessage({ type: 'acsp-updated' });
+}
+/** Saved copy at once; fetch a fresh one in the background. Pages are saved without ?job=… so every link opens fast. */
+async function savedThenFresh(event, key){
   const c = await caches.open(CACHE);
-  const net = fetch(req).then(res => { if (res.ok) c.put(req, res.clone()); return res; });
-  const timer = new Promise(r => setTimeout(r, waitMs));
-  try {
-    const first = await Promise.race([net, timer.then(() => null)]);
-    if (first) return first;
-    return (await c.match(req, {ignoreSearch: req.mode === 'navigate'})) || await net;
-  } catch (e) {
-    const saved = await c.match(req, {ignoreSearch: req.mode === 'navigate'});
-    if (saved) return saved;
-    throw e;
-  }
+  const hit = await c.match(key);
+  const net = fetch(event.request.mode === 'navigate' ? key : event.request, { cache: 'no-cache' }).then(async res => {
+    if (res.ok && res.type === 'basic') {
+      await c.put(key, res.clone());
+      if (hit && stamp(hit) !== stamp(res) && /\.(js|css)$|\/$|\.html$|^[^.]*$/.test(new URL(key.url || key).pathname)) tellUpdated();
+    }
+    return res;
+  });
+  if (hit) { event.waitUntil(net.catch(() => {})); return hit; }
+  return net;
 }
 self.addEventListener('fetch', event => {
   const req = event.request;
@@ -49,9 +56,32 @@ self.addEventListener('fetch', event => {
   const url = new URL(req.url);
   if (KEEP.some(r => r.test(req.url))) return event.respondWith(keepFirst(req));
   if (url.origin !== self.location.origin) return;
-  if (url.pathname === '/sw.js') return;
-  if (/^\/(js|css|assets)\//.test(url.pathname) || url.pathname.endsWith('.webmanifest')) return event.respondWith(networkFirst(req, 2500));
-  if (req.mode === 'navigate') return event.respondWith(networkFirst(req, 3500));
+  if (url.pathname === '/sw.js' || url.pathname === '/privacy' || url.pathname === '/privacy.html') return;
+  if (/^\/(js|css|assets)\//.test(url.pathname) || url.pathname.endsWith('.webmanifest'))
+    return event.respondWith(savedThenFresh(event, new Request(url.origin + url.pathname)));
+  if (req.mode === 'navigate') return event.respondWith(savedThenFresh(event, new Request(url.origin + url.pathname)));
+});
+// A page that opened before this service worker was running lists its files, so the next open is instant too.
+self.addEventListener('message', event => {
+  if (event.data?.type !== 'acsp-warm') return;
+  event.waitUntil((async () => {
+    const c = await caches.open(CACHE);
+    for (const u of (event.data.urls || []).slice(0, 40)) {
+      const url = new URL(u, self.location.origin); if (url.origin !== self.location.origin || url.pathname === '/sw.js') continue;
+      const key = new Request(url.origin + url.pathname);
+      if (!(await c.match(key))) await fetch(key, { cache: 'no-cache' }).then(r => r.ok && r.type === 'basic' && c.put(key, r)).catch(() => {});
+    }
+  })());
+});
+// "Update" in a portal: fetch fresh copies of everything saved before the page reloads.
+self.addEventListener('message', event => {
+  if (event.data?.type !== 'acsp-refresh') return;
+  event.waitUntil((async () => {
+    const c = await caches.open(CACHE);
+    await Promise.all((await c.keys()).filter(r => new URL(r.url).origin === self.location.origin)
+      .map(r => fetch(r.url, { cache: 'no-store' }).then(res => res.ok && c.put(r, res)).catch(() => {})));
+    event.ports?.[0]?.postMessage('done');
+  })());
 });
 
 // Save the Firebase libraries as soon as the service worker installs, so even the second visit skips them.

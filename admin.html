@@ -61,6 +61,17 @@
       if(shell){var a=document.getElementById('app');a.innerHTML=shell;a.className='shell';}
     }catch(e){}})();
   </script>
+  <script>
+    /* Safety net: if the portal can't start (for example an old saved file next to a new one after an update),
+       clear the saved copies and reload once. */
+    (function(){
+      function heal(){ if(window.__STARTED) return; try{ if(sessionStorage.getItem('acsp-healed')) return; sessionStorage.setItem('acsp-healed','1'); }catch(e){ return; }
+        var go=function(){ location.reload(); };
+        if(window.caches) caches.keys().then(function(k){ return Promise.all(k.filter(function(n){ return n.indexOf('acsp-')===0; }).map(function(n){ return caches.delete(n); })); }).then(go, go); else go(); }
+      window.addEventListener('error', function(e){ if(!window.__STARTED && /export|import|is not a function|is not defined|Unexpected/i.test(String(e.message||''))) heal(); });
+      setTimeout(function(){ if(!window.__STARTED && navigator.onLine && navigator.serviceWorker && navigator.serviceWorker.controller) heal(); }, 25000);
+    })();
+  </script>
   <script type="module" src="/js/admin.js"></script>
 </body>
 </html>
