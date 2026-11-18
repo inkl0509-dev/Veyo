@@ -244,7 +244,8 @@ if(BRAND) applyBrand(BRAND);
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const r2 = n => Math.round((+n||0)*100)/100;
-const money = n => CUR + ' ' + (+n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const num2 = n => (+n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const money = n => CUR + ' ' + num2(n);
 const nowISO = () => new Date().toISOString();
 const today = () => new Date().toLocaleDateString('en-CA',{timeZone:TZ});
 const pad = (n,w=4) => String(n).padStart(w,'0');
@@ -1133,7 +1134,7 @@ function lineEditor(key, init){
       <label class="field" style="max-width:160px"><span>Discount (${CUR})</span><input id="${key}-disc" data-np data-ed="${key}" data-f="discount" type="number" min="0" step="0.01" value="${esc(e.discount||0)}"></label>
       <div class="tot" data-tot="${key}">${totHTML(totals(e))}</div></div></div>`;
 }
-function totHTML(t){ return `<span>Subtotal</span><span>${money(t.sub)}</span>${t.disc?`<span>Discount</span><span>−${money(t.disc)}</span>`:''}<span>GST ${t.rate}%</span><span>${money(t.gst)}</span><span class="grand">Total</span><span class="grand">${money(t.total)}</span>`; }
+function totHTML(t){ return `<span>Subtotal</span><span>${num2(t.sub)}</span>${t.disc?`<span>Discount</span><span>−${num2(t.disc)}</span>`:''}<span>GST ${t.rate}%</span><span>${num2(t.gst)}</span><span class="grand">Total</span><span class="grand">${money(t.total)}</span>`; }
 function updateTotals(key){
   const e=UI.ed[key]; if(!e) return;
   const el=document.querySelector(`[data-tot="${key}"]`); if(el) el.innerHTML=totHTML(totals(e));
@@ -1145,8 +1146,8 @@ function docView(kind, dc, j){
     <div class="doc-h"><div>${BRAND?.logo?`<img class="doc-logo" src="${esc(BRAND.logo)}" alt="${esc(C.name)} logo">`:''}<h3>${esc(C.name)}</h3><p class="small muted">${esc(C.address)}${C.phone?'<br>'+esc(C.phone):''}${C.email?' · '+esc(C.email):''}${C.tin?'<br>GST TIN '+esc(C.tin):''}</p></div>
       <div><div class="doc-kind">${kind}</div><p class="small mono" style="text-align:right">${esc(dc.no)}<br>${inv?'Issued '+fd(dc.issuedAt)+'<br>Due '+fd(dc.dueDate):'Sent '+fd(dc.sentAt)+'<br>Valid until '+fd(dc.validUntil)}</p></div></div>
     <div class="small"><span class="label">Bill to</span><br><b>${esc(j.customerName||'')}</b><br>${[esc(addrLine(j)), esc(j.customerPhone||'')].filter(Boolean).join(' · ')}${custTin(j)?`<br>TIN ${esc(custTin(j))}`:''}</div>
-    <div class="tscroll"><table><thead><tr><th>Description</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead>
-      <tbody>${(dc.lines||[]).map(l=>`<tr><td>${esc(l.desc)}</td><td class="r">${esc(l.qty)}</td><td class="r">${money(l.rate)}</td><td class="r">${money((+l.qty||0)*(+l.rate||0))}</td></tr>`).join('')}</tbody></table></div>
+    <div class="tscroll"><table class="doc-lines"><thead><tr><th class="no">#</th><th>Description</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead>
+      <tbody>${(dc.lines||[]).map((l,i)=>`<tr><td class="no">${i+1}</td><td>${esc(l.desc)}</td><td class="r">${esc(+(+l.qty||0).toFixed(2))}</td><td class="r">${num2(l.rate)}</td><td class="r">${num2((+l.qty||0)*(+l.rate||0))}</td></tr>`).join('')}</tbody></table></div>
     <div class="doc-foot"><div class="small muted" style="max-width:360px">${esc(dc.notes||'')}${inv&&(dc.methods||[]).length?`<br><br><b>Pay by:</b> ${(dc.methods||[]).map(m=>METHODS[m]?.n).join(', ')}${(dc.methods||[]).includes('bml')&&C.bml?`<br>BML ${esc(C.bml)}`:''}${(dc.methods||[]).includes('mib')&&C.mib?`<br>MIB ${esc(C.mib)}`:''}`:''}</div>
       <div class="row" style="gap:16px;margin-left:auto">${paid?'<span class="stamp">PAID</span>':''}<div class="tot">${totHTML(t)}</div></div></div></div>`;
 }
@@ -1424,8 +1425,15 @@ function reportSec(j){
       ${r?`<button class="btn wa" data-act="reportShare" data-fmt="pdf" data-id="${j.id}">Send PDF</button>`:''}</div></div>`;
 }
 function printReport(){
-  document.body.classList.add('print-report');
-  const done=()=>document.body.classList.remove('print-report');
+  const P=PAPERS[paper()];
+  let st=document.getElementById('print-page'); if(!st){ st=document.createElement('style'); st.id='print-page'; document.head.appendChild(st); }
+  st.textContent=`@page{size:${P.css} portrait;margin:${paper()==='a5'?8:12}mm}`;
+  // Print a copy of the open document on its own, so nothing else on the page adds blank pages.
+  document.getElementById('print-root')?.remove();
+  const src=document.querySelector('.modal .modal-b');
+  if(src){ const r=document.createElement('div'); r.id='print-root'; r.innerHTML=src.innerHTML; document.body.appendChild(r); }
+  document.body.classList.add('print-report'); document.body.classList.toggle('print-a5', paper()==='a5');
+  const done=()=>{ document.body.classList.remove('print-report','print-a5'); document.getElementById('print-root')?.remove(); };
   if(window.AndroidApp?.print){ try{ window.AndroidApp.print(document.title); }catch(e){} setTimeout(done, 1500); return; }
   window.addEventListener('afterprint', done, {once:true}); window.print(); setTimeout(done, 60000);
 }
@@ -1475,27 +1483,52 @@ const PDF_LIBS=['https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2c
 let pdfLibsP=null, READY=null;
 function loadScript(src){ return new Promise((res,rej)=>{ const el=document.createElement('script'); el.src=src; el.crossOrigin='anonymous'; el.onload=res; el.onerror=()=>rej(new Error("Couldn't load the PDF maker. Check your internet connection.")); document.head.appendChild(el); }); }
 function pdfLibs(){ return pdfLibsP || (pdfLibsP=PDF_LIBS.reduce((p,u)=>p.then(()=>loadScript(u)), Promise.resolve()).catch(e=>{ pdfLibsP=null; throw e; })); }
-async function renderDoc(html){
+/* Paper size for quotations, invoices and reports: A4 or A5, chosen on each device (A4 unless changed).
+   The off-screen copy is laid out at a width that suits the paper, so text prints at the same size on both. */
+const PAPERS = { a4:{w:760, m:28, css:'A4'}, a5:{w:520, m:20, css:'A5'} };
+const paper = () => { try{ const p=localStorage.getItem('acsp-paper'); return PAPERS[p]?p:'a4'; }catch(e){ return 'a4'; } };
+function paperPick(){ const p=paper();
+  return `<span class="paper-pick" role="group" aria-label="Paper size"><span class="small muted">Paper</span>${Object.keys(PAPERS).map(k=>`<button class="chip sm" aria-pressed="${p===k}" data-act="setPaper" data-v="${k}">${PAPERS[k].css}</button>`).join('')}</span>`; }
+async function renderDoc(html){ return renderDocOn(html, paper()); }
+async function renderDocOn(html, size){
   await pdfLibs();
-  const box=document.createElement('div'); box.className='capture'; box.innerHTML=html; document.body.appendChild(box);
+  const box=document.createElement('div'); box.className='capture paper-'+size; box.innerHTML=html; document.body.appendChild(box);
   try{
     try{ await document.fonts?.ready; }catch(e){}
     await Promise.all([...box.querySelectorAll('img')].map(i=>i.complete?0:new Promise(r=>{ i.onload=i.onerror=r; })));
-    const w=box.offsetWidth, h=box.offsetHeight;
+    const w=box.offsetWidth, h=box.offsetHeight, top=box.getBoundingClientRect().top;
+    // Places where a new page may start: under each line of the table and between the parts of the document.
+    const breaks=[...box.querySelectorAll('tr, .doc-h, .doc-foot, .doc > *, .report-doc > *, .rd-sec, .rd-sec > *')]
+      .map(el=>Math.round(el.getBoundingClientRect().bottom-top)).filter(y=>y>0 && y<h).sort((a,b)=>a-b);
     // Render the copy at the top-left of html2canvas's own sandbox (off-screen elements can come out blank).
-    return await window.html2canvas(box,{scale:2, backgroundColor:'#ffffff', useCORS:true, logging:false,
+    const cv=await window.html2canvas(box,{scale:2, backgroundColor:'#ffffff', useCORS:true, logging:false,
       x:0, y:0, width:w, height:h, scrollX:0, scrollY:0, windowWidth:Math.max(w+40, 820), windowHeight:Math.max(h, 800),
       onclone:(doc)=>{ const c=doc.querySelector('.capture'); if(c){ c.style.left='0px'; c.style.top='0px'; } }});
+    const k=cv.height/h; cv.breaks=[...new Set(breaks.map(y=>Math.round(y*k)))]; cv.paper=size;
+    // The table's heading row, to repeat at the top of the next pages.
+    const th=box.querySelector('.doc-lines thead'); if(th){ const r=th.getBoundingClientRect(); cv.head={y:Math.round((r.top-top)*k), h:Math.round(r.height*k)}; }
+    return cv;
   } finally { box.remove(); }
 }
 function canvasToPdf(cv){
-  const pdf=new window.jspdf.jsPDF({unit:'pt', format:'a4'});
-  const W=pdf.internal.pageSize.getWidth(), H=pdf.internal.pageSize.getHeight(), m=28, w=W-2*m, slice=Math.floor((H-2*m)*cv.width/w);
-  for(let y=0,i=0; y<cv.height; y+=slice,i++){
-    const h=Math.min(slice, cv.height-y), part=document.createElement('canvas'); part.width=cv.width; part.height=h;
-    const g=part.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,part.width,h); g.drawImage(cv,0,y,cv.width,h,0,0,cv.width,h);
-    if(i) pdf.addPage(); pdf.addImage(part.toDataURL('image/jpeg',0.92),'JPEG',m,m,w,h*w/cv.width);
+  const P=PAPERS[cv.paper]||PAPERS.a4, pdf=new window.jspdf.jsPDF({unit:'pt', format:P.css.toLowerCase()});
+  const W=pdf.internal.pageSize.getWidth(), H=pdf.internal.pageSize.getHeight(), m=P.m, w=W-2*m, full=Math.floor((H-2*m)*cv.width/w);
+  const tableEnd=cv.head ? Math.max(...(cv.breaks||[0]).filter(v=>v>cv.head.y)) : 0;
+  for(let y=0,i=0; y<cv.height-1; i++){
+    // Later pages that continue the table start with its heading row again.
+    const head = i && cv.head && y>cv.head.y && y<tableEnd ? cv.head : null, room=full-(head?head.h:0);
+    // End the page at the last line that fits, so no line of the table is cut in half.
+    let end=Math.min(y+room, cv.height);
+    if(end<cv.height){ const b=(cv.breaks||[]).filter(v=>v>y+room*0.4 && v<=y+room).pop(); if(b) end=b; }
+    const h=end-y, hh=head?head.h:0, part=document.createElement('canvas'); part.width=cv.width; part.height=h+hh;
+    const g=part.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,part.width,h+hh);
+    if(head) g.drawImage(cv,0,head.y,cv.width,hh,0,0,cv.width,hh);
+    g.drawImage(cv,0,y,cv.width,h,0,hh,cv.width,h);
+    if(i) pdf.addPage(); pdf.addImage(part.toDataURL('image/jpeg',0.92),'JPEG',m,m,w,(h+hh)*w/cv.width);
+    y=end;
   }
+  const n=pdf.getNumberOfPages();
+  if(n>1) for(let i=1;i<=n;i++){ pdf.setPage(i); pdf.setFont('helvetica','normal'); pdf.setFontSize(7.5); pdf.setTextColor(120,135,150); pdf.text(`Page ${i} of ${n}`, W-m, H-m/2-2, {align:'right'}); }
   return pdf.output('blob');
 }
 const toBase64 = blob => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result).split(',')[1]); r.onerror=rej; r.readAsDataURL(blob); });
@@ -1563,7 +1596,7 @@ function docActions(kind, D, j){
   return `<div class="row doc-acts no-print"><button class="btn sm" data-act="docSave" data-kind="${kind}" data-id="${j.id}">⤓ Save PDF</button>
     <button class="btn sm ${office?'wa':''}" data-act="docShare" data-fmt="pdf" data-kind="${kind}" data-id="${j.id}">${office?'Send PDF':'Share PDF'}</button>
     ${office?`<button class="btn sm wa" data-act="docShare" data-fmt="img" data-kind="${kind}" data-id="${j.id}">Send as photo</button>`:''}
-    <button class="btn sm" data-act="printDoc" data-kind="${kind}" data-id="${j.id}">View / print</button></div>`;
+    <button class="btn sm" data-act="printDoc" data-kind="${kind}" data-id="${j.id}">View / print</button>${paperPick()}</div>`;
 }
 function docWaLink(kind, D, j){
   const C=co(), t=totals(D), paid=kind==='Invoice' && j.payment?.status==='paid';
@@ -1833,7 +1866,7 @@ const ACT = {
   viewReport(el){ const j=job(el.dataset.id); pdfLibs().catch(()=>{});
     UI.modal={title:`Service report ${j.no}`, wide:true, html:reportDoc(j)+`<div class="row no-print" style="margin-top:14px"><button class="btn primary" data-act="reportShare" data-fmt="save" data-id="${j.id}">⤓ Save PDF</button>
       <button class="btn ${ME.role!=='customer'?'wa':''}" data-act="reportShare" data-fmt="pdf" data-id="${j.id}">${ME.role!=='customer'?'Send PDF':'Share PDF'}</button>${ME.role!=='customer'?`<button class="btn wa" data-act="reportShare" data-fmt="img" data-id="${j.id}">Send as photo</button>`:''}
-      <button class="btn" data-act="printReport">Print</button></div>`}; render(); },
+      <button class="btn" data-act="printReport">Print</button>${paperPick()}</div>`}; render(); },
   printReport(){ printReport(); },
   async copyText(el){ const t=el.dataset.text; try{ await navigator.clipboard.writeText(t); toast('Copied. Paste it in any chat.'); }
     catch(e){ const ta=document.getElementById('share-text'); if(ta){ ta.select(); document.execCommand('copy'); toast('Copied.'); } else toast("Couldn't copy."); } },
@@ -1841,6 +1874,9 @@ const ACT = {
   printDoc(el){ const j=job(el.dataset.id), kind=el.dataset.kind, D=kind==='Invoice'?j.invoice:j.quote; if(!D) return;
     pdfLibs().catch(()=>{});   // get the PDF maker ready while the document is on screen
     UI.modal={title:`${kind} ${D.no}`, wide:true, html:docView(kind,D,j)+docActions(kind,D,j).replace('data-act="printDoc"','data-act="printReport"').replace('View / print','Print')}; render(); },
+  setPaper(el){ try{ localStorage.setItem('acsp-paper', el.dataset.v); }catch(e){}
+    if(UI.modal?.html) UI.modal.html=UI.modal.html.replace(/<span class="paper-pick"[\s\S]*?<\/button><\/span>/, paperPick());
+    render(); toast(`Paper: ${PAPERS[el.dataset.v].css}`); },
   docSave(el){ const j=job(el.dataset.id), kind=el.dataset.kind, D=kind==='Invoice'?j.invoice:j.quote; if(!D) return;
     saveDocFile(docView(kind,D,j), `${kind}-${D.no}`).catch(e=>toast(e.message||"Couldn't make the PDF.")); },
   docShare(el){ const j=job(el.dataset.id), kind=el.dataset.kind, D=kind==='Invoice'?j.invoice:j.quote; if(!D) return;
