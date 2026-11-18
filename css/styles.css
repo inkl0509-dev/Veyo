@@ -759,3 +759,43 @@ body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5
 .spin{display:inline-block;width:14px;height:14px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;vertical-align:-2px;margin-right:6px;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.spin{animation-duration:2.4s}}
+
+/* Quotation / invoice lines: number on the left, plain amounts (the currency is on the total) */
+.doc-lines th.no,.doc-lines td.no{width:26px;padding-right:6px;color:var(--muted);text-align:left;font-variant-numeric:tabular-nums}
+.doc-lines td.r,.doc-lines th.r{white-space:nowrap}
+.doc-lines td:nth-child(2){word-break:break-word}
+
+/* Paper size (A4 / A5) next to the document buttons */
+.paper-pick{display:inline-flex;align-items:center;gap:4px;margin-left:auto}
+.paper-pick .chip{min-height:30px;padding:4px 10px;font-size:.8rem}
+
+/* A5 copy for PDFs and photos: narrower, so the text prints at the same size as on A4 */
+.capture.paper-a5{width:520px;padding:16px}
+.capture.paper-a5 .doc{padding:14px;gap:10px}
+.capture.paper-a5 .doc-kind{font-size:1.35rem}
+.capture.paper-a5 .doc-logo{max-height:44px;max-width:140px}
+.capture.paper-a5 .doc-h h3{font-size:1.05rem}
+.capture.paper-a5 .doc table{font-size:.84rem}
+.capture.paper-a5 .tot{min-width:200px}
+.capture.paper-a5 .doc-foot>div:first-child{max-width:260px!important}
+
+/* Printing on the chosen paper */
+@media print{
+  body.print-report .doc{border:0;border-top:4px solid #0A4D8C;box-shadow:none;padding:0;padding-top:10px}
+  body.print-report .doc table{font-size:10pt}
+  body.print-report .doc tr{break-inside:avoid}
+  body.print-report.print-a5 .doc{gap:8px}
+  body.print-report.print-a5 .doc table{font-size:8.5pt}
+  body.print-report.print-a5 .doc-kind{font-size:16pt}
+  body.print-report.print-a5 .doc-logo{max-height:36px}
+  body.print-report.print-a5 .small{font-size:8pt}
+  body.print-report.print-a5 .tot{font-size:9pt;min-width:0}
+}
+#print-root{display:none}
+@media print{
+  body.print-report:has(#print-root) > *:not(#print-root){display:none!important}
+  body.print-report #print-root{display:block;visibility:visible}
+  body.print-report #print-root *{visibility:visible}
+  body.print-report #print-root .no-print{display:none}
+  body.print-report:has(#print-root){background:#fff}
+}
