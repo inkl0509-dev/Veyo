@@ -1016,7 +1016,7 @@ function jobDetail(j){
   if(role==='technician' && j.techId!==ME.user.uid) return openJobDetail(j);
   let h=`<div class="jd-head"><div><button class="btn sm back" data-act="closeJob">← Back</button></div>
     <div class="jd-title"><span class="mono">${esc(j.no)}</span>${pill(j)}</div><h2>${esc(jobTitle(j))}</h2>
-    <p class="muted small">${[esc(j.customerName||''), esc(j.customerPhone||''), esc(addrLine(j))].filter(Boolean).join(' · ')} · Requested ${fdt(j.createdAt)}</p></div>`;
+    <p class="muted small">${[esc(j.customerName||''), esc(j.customerPhone||''), esc(addrLine(j))].filter(Boolean).join(' · ')} · Requested ${fdt(j.createdAt)}${role==='provider' && S.customers.some(x=>x.id===j.customerId)?` · <button class="linkbtn" data-act="editCustFromJob" data-id="${j.customerId}">Edit customer</button>`:''}</p></div>`;
   if(s!=='cancelled') h+=tracker(j);
   if(role==='technician') h+=techNext(j);
   if(j.departedAt) h+=trackingSec(j);
