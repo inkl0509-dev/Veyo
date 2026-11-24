@@ -2047,8 +2047,45 @@ document.addEventListener('input', e=>{ const el=e.target;
 const sendReset = email => A.sendPasswordResetEmail(auth, email);
 
 /** Each portal entry file calls start({view, actions, forms, change}). */
+/* ---------- pull down to refresh ----------
+   At the top of the page, pull down and let go: the portal fetches the newest files and reloads,
+   staying on the job that was open. Works the same in the browser, the installed portals and the Android apps
+   (which have no pull-to-refresh of their own). Not inside a pop-up, map, the notifications panel or while typing. */
+async function hardRefresh(){
+  try{ saveUI(); }catch(e){}
+  try{ const sw=navigator.serviceWorker?.controller;
+    if(sw && navigator.onLine!==false) await Promise.race([new Promise(res=>{ const ch=new MessageChannel(); ch.port1.onmessage=res; sw.postMessage({type:'acsp-refresh'},[ch.port2]); }), new Promise(r=>setTimeout(r,5000))]); }catch(e){}
+  const qs=new URLSearchParams(location.search); if(UI.sel) qs.set('job', UI.sel);
+  location.replace(location.pathname+(qs.toString()?'?'+qs:''));
+}
+function pullToRefresh(){
+  if(!('ontouchstart' in window) || window.__PTR) return; window.__PTR=true;
+  const ui=document.createElement('div'); ui.id='ptr'; ui.setAttribute('aria-hidden','true');
+  ui.innerHTML='<div class="ptr-dot"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div><span class="ptr-txt"></span>';
+  document.body.appendChild(ui);
+  const MAX=110, GO=72, txt=ui.querySelector('.ptr-txt');
+  let y0=null, x0=0, d=0, on=false, busy=false;
+  const blocked=t=> !!(UI.modal || UI.bell || t.closest?.('.modal, .bell-panel, .leaflet-container, textarea, input, select, [contenteditable]') ||
+    (t.closest?.('.thread, .joblist')?.scrollTop>0) ||
+    (document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)));
+  const show=v=>{ ui.style.transform=`translate(-50%, ${Math.min(v,MAX)-56}px)`; ui.style.opacity=Math.min(1, v/40);
+    ui.classList.toggle('ready', v>=GO); ui.querySelector('svg').style.transform=`rotate(${v>=GO?180:Math.round(v/GO*150)}deg)`;
+    txt.textContent = v>=GO ? 'Release to refresh' : 'Pull to refresh'; };
+  const reset=()=>{ ui.classList.add('back'); ui.style.transform='translate(-50%, -64px)'; ui.style.opacity='0'; setTimeout(()=>ui.classList.remove('back'), 250); on=false; d=0; y0=null; };
+  addEventListener('touchstart', e=>{ if(busy || e.touches.length!==1 || window.scrollY>0 || blocked(e.target)) { y0=null; return; }
+    y0=e.touches[0].clientY; x0=e.touches[0].clientX; d=0; on=false; }, {passive:true});
+  addEventListener('touchmove', e=>{ if(y0==null || busy) return;
+    const dy=e.touches[0].clientY-y0, dx=Math.abs(e.touches[0].clientX-x0);
+    if(!on){ if(dy>8 && dy>dx*1.5 && window.scrollY<=0) on=true; else if(dy<0 || dx>12){ y0=null; return; } else return; }
+    d=Math.max(0, dy*0.5); if(e.cancelable) e.preventDefault(); show(d); }, {passive:false});
+  const end=()=>{ if(!on){ y0=null; return; }
+    if(d>=GO){ busy=true; ui.classList.add('spinning'); ui.style.transform=`translate(-50%, ${GO-56}px)`; txt.textContent='Refreshing…'; hardRefresh(); }
+    else reset(); };
+  addEventListener('touchend', end, {passive:true}); addEventListener('touchcancel', reset, {passive:true});
+}
 function start(def){
   window.__STARTED=true;
+  try{ pullToRefresh(); }catch(e){ console.warn('pull to refresh', e); }
   Object.assign(P, def);
   const qs=new URLSearchParams(location.search), qj=qs.get('job'), qc=qs.get('chat');
   if(qj) UI.pendingJob=qj;
