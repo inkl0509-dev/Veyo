@@ -164,8 +164,20 @@ function editCustForm(){
     <label class="field"><span>Address</span><input id="ec-address" name="address" value="${esc(cu.address||'')}"></label>
     <label class="field"><span>GST TIN <small class="muted">(optional, for businesses)</small></span><input id="ec-tin" name="tin" value="${esc(cu.tin||'')}"></label>
     ${cu.email?`<p class="small muted">Login email: ${esc(cu.email)} (the customer changes it themselves).</p>`:''}
-    <div class="row"><button class="btn primary">Save changes</button></div></div></form>`;
+    <div class="row"><button class="btn primary">Save changes</button><button type="button" class="btn" data-act="editCustClose">Cancel</button></div>
+    ${delCustBox(cu)}</div></form>`;
 }
+/* Deleting a customer removes them from the list and deletes their portal login (so the email can be used again).
+   Their past requests, invoices and payments stay in Jobs and Accounting under their name; requests still waiting
+   (not started, no invoice) are cancelled. */
+function custJobs(id){ const js=S.jobs.filter(j=>j.customerId===id);
+  return { all:js, open:js.filter(j=>!j.cancelled && !j.finishedAt && !j.invoice), unpaid:js.filter(j=>j.invoice && j.payment?.status!=='paid') }; }
+function delCustBox(cu){ const J=custJobs(cu.id), k='delcust'+cu.id, armed=UI.confirm===k;
+  const notes=[J.open.length?`${J.open.length} open request${J.open.length>1?'s':''} will be cancelled.`:'',
+    J.unpaid.length?`${J.unpaid.length} unpaid invoice${J.unpaid.length>1?'s stay':' stays'} in Accounting.`:'',
+    J.all.length?'Past requests and invoices are kept.':'', userOf(cu.id)?'Their portal login is deleted too.':''].filter(Boolean).join(' ');
+  return `<div class="danger-zone"><b>Delete this customer</b><p class="small muted">${notes||'They have no requests yet.'}</p>
+    <button type="button" class="btn sm danger ${armed?'armed':''}" data-act="delCustomer" data-id="${cu.id}">${armed?'Tap again to delete':'Delete customer'}</button></div>`; }
 function userOf(id){ return S.users.find(u=>u.id===id); }
 function statusPill(u){ return !u? '<span class="pill mute">No login</span>' : (u.status||'active')==='active'? '<span class="pill teal">Active</span>' : '<span class="pill bad">Paused</span>'; }
 function customersView(){
@@ -174,7 +186,7 @@ function customersView(){
   return `<div class="cols" style="grid-template-columns:minmax(0,2fr) minmax(280px,1fr)">
     <div class="card"><div class="card-h"><h2>Customers</h2><div class="row"><button class="btn sm" data-act="shareLink" data-id="">Share portal link</button><input id="cust-q" type="search" placeholder="Search" value="${esc(UI.cq||'')}" data-input="cq" style="max-width:220px" aria-label="Search customers"></div></div>
     ${rows.length?`<div class="tscroll"><table class="t"><thead><tr><th>Name</th><th>Contact</th><th>Address</th><th>Portal login</th><th class="r">Requests</th><th class="r">Outstanding</th><th></th></tr></thead><tbody>
-    ${rows.map(({cu,u,n,due})=>`<tr><td><b>${esc(cu.name||'(no name yet)')}</b>${cu.guest?' <span class="pill mango" title="Booked without an account; their requests stay on their phone until they create one">Guest</span>':''}</td><td>${esc(cu.phone)}<br><span class="small muted">${esc(cu.email||'')}${cu.tin?`${cu.email?' · ':''}TIN ${esc(cu.tin)}`:''}</span></td><td>${esc(K.addrLine(cu))}</td><td>${statusPill(u)}</td><td class="r">${n}</td><td class="r" style="${due?'color:var(--coral-text);font-weight:800':''}">${money(due)}</td>
+    ${rows.map(({cu,u,n,due})=>`<tr${UI.editCust===cu.id?' class="sel-row"':''}><td><button class="linkbtn strong" data-act="editCust" data-id="${cu.id}" title="Edit or delete">${esc(cu.name||'(no name yet)')}</button>${cu.guest?' <span class="pill mango" title="Booked without an account; their requests stay on their phone until they create one">Guest</span>':''}</td><td>${esc(cu.phone)}<br><span class="small muted">${esc(cu.email||'')}${cu.tin?`${cu.email?' · ':''}TIN ${esc(cu.tin)}`:''}</span></td><td>${esc(K.addrLine(cu))}</td><td>${statusPill(u)}</td><td class="r">${n}</td><td class="r" style="${due?'color:var(--coral-text);font-weight:800':''}">${money(due)}</td>
       <td><div class="row" style="flex-wrap:nowrap"><button class="btn sm wa" data-act="shareLink" data-id="${cu.id}" title="Send their portal link by WhatsApp or Viber">Share link</button><button class="btn sm" data-act="editCust" data-id="${cu.id}">Edit</button><button class="btn sm" data-act="newJob" data-id="${cu.id}">Book</button>${u?`<button class="btn sm" data-act="toggleUser" data-id="${cu.id}">${(u.status||'active')==='active'?'Pause':'Activate'}</button><button class="btn sm danger ${UI.confirm==='dellogin'+cu.id?'armed':''}" data-act="delLogin" data-who="Customer login" data-id="${cu.id}" title="Deletes the login; their requests and invoices stay">${UI.confirm==='dellogin'+cu.id?'Tap again':'Delete login'}</button>`:''}</div></td></tr>`).join('')}
     </tbody></table></div>`:`<div class="empty"><h3>No customers yet</h3><p>Customers appear here when they sign up on the customer portal, or when you add them.</p></div>`}</div>
     ${editCustForm() || `<form class="card" data-form="addCustomer"><div class="card-h"><h3>Add a customer</h3></div><div class="card-b stack">
@@ -406,7 +418,19 @@ const actions = {
   shareLink(el){ const cu=S.customers.find(x=>x.id===el.dataset.id);
     K.shareModal(cu?`Send ${cu.name} the portal link`:'Share the customer portal link', K.inviteText(cu?{name:cu.name}:{name:''}, cu?.email?{email:cu.email}:null), cu?.phone||''); },
   editCust(el){ UI.editCust=el.dataset.id; render(); if(innerWidth<900) document.querySelector('.edit-cust')?.scrollIntoView({behavior:'smooth'}); },
-  editCustClose(){ UI.editCust=null; render(); },
+  editCustClose(){ UI.editCust=null; UI.confirm=''; render(); },
+  editCustFromJob(el){ UI.ptab='customers'; UI.sel=''; UI.editCust=el.dataset.id; UI.cq=''; saveUI(); render(); scrollTo(0,0);
+    setTimeout(()=>document.querySelector('.edit-cust')?.scrollIntoView({behavior:'smooth', block:'start'}), 80); },
+  delCustomer(el){ const id=el.dataset.id, cu=S.customers.find(x=>x.id===id), k='delcust'+id; if(!cu) return;
+    if(UI.confirm!==k){ UI.confirm=k; return render(); } UI.confirm='';
+    const J=custJobs(id), at=nowISO();
+    run(async()=>{
+      if(userOf(id)){ try{ await K.callAdmin('delete', {uid:id}); }
+        catch(e){ if(!e.fnMissing) throw e; await F.updateDoc(d('users',id), {status:'paused'}); } }
+      const b=F.writeBatch(db);
+      J.open.forEach(j=>b.update(K.jobRef(j.id), {cancelled:true, cancelledAt:at, cancelReason:'Customer deleted by the office'}));
+      b.delete(d('customers',id));
+      await b.commit(); UI.editCust=null; }, `${cu.name||'Customer'} deleted`); },
   qiStart(el){ UI.ptab='jobs'; UI.newJob=null; UI.sel=''; delete UI.ed.qi; UI.qi={type:el.dataset.v||'quote', custId:el.dataset.id||'', cq:''}; render(); scrollTo(0,0); },
   qiCancel(){ UI.qi=null; delete UI.ed.qi; render(); },
   qiType(el){ UI.qi.type=el.dataset.v; const e=UI.ed.qi; if(e) e.notes = el.dataset.v==='invoice' ? 'Thank you for your business.' : 'Prices include labour. Parts or gas beyond the listed quantities are charged separately.'; render(); },
