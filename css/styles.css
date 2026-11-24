@@ -813,3 +813,9 @@ html,body{overscroll-behavior-y:contain}
 #ptr.spinning svg path{d:path("M12 4a8 8 0 1 0 8 8")}
 @media (prefers-reduced-motion:reduce){#ptr svg{transition:none}#ptr.spinning svg{animation-duration:2.4s}}
 @media print{#ptr{display:none!important}}
+/* Customers: name opens the customer; deleting sits apart at the bottom */
+.linkbtn.strong{font-weight:800;color:var(--ink);text-decoration:none;text-align:left}
+.linkbtn.strong:hover{text-decoration:underline}
+.t tr.sel-row td{background:color-mix(in srgb, var(--lagoon) 9%, transparent)}
+.danger-zone{margin-top:14px;padding-top:12px;border-top:1px dashed var(--line);display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+.danger-zone b{color:var(--coral-text,#b5420a)}
