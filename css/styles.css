@@ -799,3 +799,17 @@ body[data-portal="platform"]{ --hero-a:#1E1B4B; --hero-b:#4338CA; --hero-sun:#A5
   body.print-report #print-root .no-print{display:none}
   body.print-report:has(#print-root){background:#fff}
 }
+
+/* Pull down to refresh */
+html,body{overscroll-behavior-y:contain}
+#ptr{position:fixed;z-index:1700;left:50%;top:calc(env(safe-area-inset-top,0px) + 8px);transform:translate(-50%,-64px);opacity:0;
+  display:flex;align-items:center;gap:8px;padding:6px 14px 6px 6px;border-radius:999px;background:var(--surface,#fff);color:var(--ink,#14202b);
+  box-shadow:0 6px 20px -6px rgba(8,21,31,.35);pointer-events:none;font-size:.85rem;font-weight:600;will-change:transform}
+#ptr.back{transition:transform .22s ease,opacity .22s ease}
+#ptr .ptr-dot{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--brand,#0A4D8C);color:#fff}
+#ptr svg{transition:transform .12s linear}
+#ptr.ready .ptr-dot{background:var(--coral,#e8590c)}
+#ptr.spinning svg{animation:spin .8s linear infinite}
+#ptr.spinning svg path{d:path("M12 4a8 8 0 1 0 8 8")}
+@media (prefers-reduced-motion:reduce){#ptr svg{transition:none}#ptr.spinning svg{animation-duration:2.4s}}
+@media print{#ptr{display:none!important}}
